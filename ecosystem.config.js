@@ -3,7 +3,7 @@ module.exports = {
     name: 'xdialcore-api',
     cwd: '/root/xdialcoreapi',
     script: '.venv/bin/python',
-    args: '-m uvicorn main:app --host 0.0.0.0 --port 8001',
+    args: '-m uvicorn trunk:app --host 0.0.0.0 --port 8001',
     instances: 1,
     exec_mode: 'fork',
     autorestart: true,
