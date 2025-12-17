@@ -19,7 +19,7 @@ class Recording(BaseModel):
     file_url: str
     server_id: int
     server_name: str
-    extension: str
+    extension: int
 
 
 class PaginationInfo(BaseModel):
