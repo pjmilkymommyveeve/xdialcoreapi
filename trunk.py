@@ -5,7 +5,7 @@ from core.settings import settings
 from database.db import init_db_pool, close_db_pool
 
 # import routers
-from api import auth, campaigns, export, integration, recordings
+from api import auth, campaigns, export, integration, recordings, stats, client
 
 
 @asynccontextmanager
@@ -37,10 +37,12 @@ app.add_middleware(
 
 # include routers
 app.include_router(auth.router, prefix=settings.app.api_prefix)
+app.include_router(client.router, prefix=settings.app.api_prefix)
 app.include_router(campaigns.router, prefix=settings.app.api_prefix)
+app.include_router(recordings.router, prefix=settings.app.api_prefix)
 app.include_router(export.router, prefix=settings.app.api_prefix)
 app.include_router(integration.router, prefix=settings.app.api_prefix)
-app.include_router(recordings.router, prefix=settings.app.api_prefix)
+app.include_router(stats.router, prefix=settings.app.api_prefix)
 
 
 @app.get("/")
@@ -65,7 +67,7 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        "main:app",
+        "trunk:app",
         host="0.0.0.0",
         port=8000,
         reload=settings.app.debug

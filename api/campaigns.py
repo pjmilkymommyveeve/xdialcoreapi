@@ -187,7 +187,7 @@ async def get_client_campaign(
         user_role_row = await conn.fetchrow(user_role_query, user_id)
         user_role = user_role_row['name']
         
-        if user_role not in ['admin', 'onboarding', 'qa'] and campaign['client_id'] != user_id:
+        if user_role not in ['admin', 'onboarding'] and campaign['client_id'] != user_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied"
