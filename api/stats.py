@@ -25,6 +25,7 @@ class CampaignTransferStats(BaseModel):
     model_name: str
     client_name: str
     is_active: bool
+    current_status: Optional[str]
     total_calls: int
     transferred_calls: int
     transfer_rate: float
@@ -120,12 +121,21 @@ async def get_all_campaigns_transfer_stats(
     - Overall campaign transfer stats
     
     All statistics are based on the FINAL STAGE of each call (last stage per number).
+    Only includes campaigns that are not Archived.
     """
     pool = await get_db()
     
     async with pool.acquire() as conn:
-        # Build campaign filter
-        campaign_filter = "ccm.is_enabled = true"
+        # Build campaign filter - exclude archived campaigns
+        campaign_filter = """
+            EXISTS (
+                SELECT 1 FROM status_history sh
+                JOIN status s ON sh.status_id = s.id
+                WHERE sh.client_campaign_id = ccm.id
+                AND sh.end_date IS NULL
+                AND s.status_name != 'Archived'
+            )
+        """
         campaign_params = []
         
         if client_id:
@@ -135,12 +145,16 @@ async def get_all_campaigns_transfer_stats(
         # Get all campaigns
         campaigns_query = f"""
             SELECT ccm.id, ccm.client_id, cl.name as client_name,
-                   ca.name as campaign_name, m.name as model_name, ccm.is_active
+                   ca.name as campaign_name, m.name as model_name, ccm.is_active,
+                   s.status_name as current_status
             FROM client_campaign_model ccm
             JOIN clients cl ON ccm.client_id = cl.client_id
             JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
             JOIN campaigns ca ON cm.campaign_id = ca.id
             JOIN models m ON cm.model_id = m.id
+            LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id 
+                AND sh.end_date IS NULL
+            LEFT JOIN status s ON sh.status_id = s.id
             WHERE {campaign_filter}
             ORDER BY cl.name, ca.name, m.name
         """
@@ -236,6 +250,7 @@ async def get_all_campaigns_transfer_stats(
                 model_name=campaign['model_name'],
                 client_name=campaign['client_name'],
                 is_active=campaign['is_active'],
+                current_status=campaign['current_status'],
                 total_calls=total_calls,
                 transferred_calls=total_transferred,
                 transfer_rate=calculate_transfer_rate(total_transferred, total_calls),
@@ -271,12 +286,21 @@ async def get_overall_voice_stats(
     
     All statistics are based on the FINAL STAGE of each call (last stage per number).
     Aggregates data across all campaigns to show overall voice performance.
+    Only includes campaigns that are not Archived.
     """
     pool = await get_db()
     
     async with pool.acquire() as conn:
-        # Build campaign filter
-        campaign_filter = "ccm.is_enabled = true"
+        # Build campaign filter - exclude archived campaigns
+        campaign_filter = """
+            EXISTS (
+                SELECT 1 FROM status_history sh
+                JOIN status s ON sh.status_id = s.id
+                WHERE sh.client_campaign_id = ccm.id
+                AND sh.end_date IS NULL
+                AND s.status_name != 'Archived'
+            )
+        """
         campaign_params = []
         
         if client_id:

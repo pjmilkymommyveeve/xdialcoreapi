@@ -71,9 +71,9 @@ async def get_client_campaigns(
     user_id: int = Depends(get_current_user_id)
 ):
     """
-    GET CLIENT CAMPAIGNS - Returns all approved and enabled campaigns for the specified client.
-    - Regular clients can only access their own campaigns (where is_approved=True)
-    - Admin, onboarding, and QA roles can access any client's campaigns
+    GET CLIENT CAMPAIGNS - Returns all campaigns with 'Enabled' status for the specified client.
+    - Regular clients can only access their own campaigns (where current_status='Enabled')
+    - Admin, onboarding, and QA roles can access any client's campaigns (any status except 'Archived')
     """
     pool = await get_db()
     
@@ -103,12 +103,29 @@ async def get_client_campaigns(
                 detail="Access denied. You can only view your own campaigns."
             )
         
-        # Get client information
-        client_query = """
-            SELECT client_id, name
-            FROM clients
-            WHERE client_id = $1 AND is_archived = false
-        """
+        # Get client information (exclude archived clients if not privileged)
+        if is_privileged:
+            client_query = """
+                SELECT c.client_id, c.name,
+                       s.status_name as client_status
+                FROM clients c
+                LEFT JOIN status_history sh ON c.client_id = sh.client_campaign_id 
+                    AND sh.end_date IS NULL
+                LEFT JOIN status s ON sh.status_id = s.id
+                WHERE c.client_id = $1
+            """
+        else:
+            client_query = """
+                SELECT c.client_id, c.name,
+                       s.status_name as client_status
+                FROM clients c
+                LEFT JOIN status_history sh ON c.client_id = sh.client_campaign_id 
+                    AND sh.end_date IS NULL
+                LEFT JOIN status s ON sh.status_id = s.id
+                WHERE c.client_id = $1 
+                    AND (s.status_name != 'Archived' OR s.status_name IS NULL)
+            """
+        
         client_data = await conn.fetchrow(client_query, client_id)
         
         if not client_data:
@@ -121,46 +138,76 @@ async def get_client_campaigns(
         
         # Build query based on role
         if is_privileged:
-            # Admin/onboarding/QA see all enabled campaigns (approved or not)
-            where_clause = "ccm.client_id = $1 AND ccm.is_enabled = true"
+            # Admin/onboarding/QA see all campaigns except 'Archived'
+            campaigns_query = """
+                SELECT 
+                    ccm.id as campaign_id,
+                    ccm.start_date,
+                    ccm.end_date,
+                    ccm.is_active,
+                    ccm.is_custom,
+                    ccm.custom_comments,
+                    ccm.current_remote_agents,
+                    ccm.bot_count,
+                    ccm.long_call_scripts_active,
+                    ccm.disposition_set,
+                    ca.id as camp_id,
+                    ca.name as camp_name,
+                    ca.description as camp_desc,
+                    m.id as model_id,
+                    m.name as model_name,
+                    m.description as model_desc,
+                    sh.id as status_history_id,
+                    sh.start_date as status_start,
+                    sh.end_date as status_end,
+                    s.id as status_id,
+                    s.status_name
+                FROM client_campaign_model ccm
+                JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
+                JOIN campaigns ca ON cm.campaign_id = ca.id
+                JOIN models m ON cm.model_id = m.id
+                LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id 
+                    AND sh.end_date IS NULL
+                LEFT JOIN status s ON sh.status_id = s.id
+                WHERE ccm.client_id = $1 
+                    AND (s.status_name != 'Archived' OR s.status_name IS NULL)
+                ORDER BY ccm.start_date DESC
+            """
         else:
-            # Regular clients only see approved and enabled campaigns
-            where_clause = "ccm.client_id = $1 AND ccm.is_enabled = true AND ccm.is_approved = true"
-        
-        # Fetch campaigns with related data
-        campaigns_query = f"""
-            SELECT 
-                ccm.id as campaign_id,
-                ccm.start_date,
-                ccm.end_date,
-                ccm.is_active,
-                ccm.is_custom,
-                ccm.custom_comments,
-                ccm.current_remote_agents,
-                ccm.bot_count,
-                ccm.long_call_scripts_active,
-                ccm.disposition_set,
-                ccm.is_approved,
-                ca.id as camp_id,
-                ca.name as camp_name,
-                ca.description as camp_desc,
-                m.id as model_id,
-                m.name as model_name,
-                m.description as model_desc,
-                sh.id as status_history_id,
-                sh.start_date as status_start,
-                sh.end_date as status_end,
-                s.id as status_id,
-                s.status_name
-            FROM client_campaign_model ccm
-            JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
-            JOIN campaigns ca ON cm.campaign_id = ca.id
-            JOIN models m ON cm.model_id = m.id
-            LEFT JOIN status_history sh ON ccm.status_history_id = sh.id
-            LEFT JOIN status s ON sh.status_id = s.id
-            WHERE {where_clause}
-            ORDER BY ccm.start_date DESC
-        """
+            # Regular clients only see 'Enabled' campaigns
+            campaigns_query = """
+                SELECT 
+                    ccm.id as campaign_id,
+                    ccm.start_date,
+                    ccm.end_date,
+                    ccm.is_active,
+                    ccm.is_custom,
+                    ccm.custom_comments,
+                    ccm.current_remote_agents,
+                    ccm.bot_count,
+                    ccm.long_call_scripts_active,
+                    ccm.disposition_set,
+                    ca.id as camp_id,
+                    ca.name as camp_name,
+                    ca.description as camp_desc,
+                    m.id as model_id,
+                    m.name as model_name,
+                    m.description as model_desc,
+                    sh.id as status_history_id,
+                    sh.start_date as status_start,
+                    sh.end_date as status_end,
+                    s.id as status_id,
+                    s.status_name
+                FROM client_campaign_model ccm
+                JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
+                JOIN campaigns ca ON cm.campaign_id = ca.id
+                JOIN models m ON cm.model_id = m.id
+                LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id 
+                    AND sh.end_date IS NULL
+                LEFT JOIN status s ON sh.status_id = s.id
+                WHERE ccm.client_id = $1 AND s.status_name = 'Enabled'
+                ORDER BY ccm.start_date DESC
+            """
         
         campaigns_data = await conn.fetch(campaigns_query, client_id)
         

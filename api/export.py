@@ -69,13 +69,17 @@ async def get_export_options(
         # verify access to campaign
         campaign_query = """
             SELECT ccm.id, ccm.client_id, c.name as client_name,
-                   ca.name as campaign_name, m.name as model_name
+                   ca.name as campaign_name, m.name as model_name,
+                   s.status_name as current_status
             FROM client_campaign_model ccm
             JOIN clients c ON ccm.client_id = c.client_id
             JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
             JOIN campaigns ca ON cm.campaign_id = ca.id
             JOIN models m ON cm.model_id = m.id
-            WHERE ccm.id = $1 AND ccm.is_enabled = true
+            LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id 
+                AND sh.end_date IS NULL
+            LEFT JOIN status s ON sh.status_id = s.id
+            WHERE ccm.id = $1
         """
         campaign = await conn.fetchrow(campaign_query, campaign_id)
         
@@ -85,12 +89,19 @@ async def get_export_options(
                 detail="Campaign not found"
             )
         
+        # Check if campaign is in valid status
+        if campaign['current_status'] not in ['Enabled', 'Disabled']:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Campaign is not accessible for export"
+            )
+        
         # check user owns campaign (unless admin/onboarding)
         user_role_query = "SELECT r.name FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = $1"
         user_role_row = await conn.fetchrow(user_role_query, user_id)
         user_role = user_role_row['name']
         
-        if user_role not in ['admin', 'onboarding'] and campaign['client_id'] != user_id:
+        if user_role not in ['admin', 'onboarding', 'qa'] and campaign['client_id'] != user_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied"
@@ -188,11 +199,15 @@ async def download_export(
     async with pool.acquire() as conn:
         # verify access
         campaign_query = """
-            SELECT ccm.id, ccm.client_id, ca.name as campaign_name
+            SELECT ccm.id, ccm.client_id, ca.name as campaign_name,
+                   s.status_name as current_status
             FROM client_campaign_model ccm
             JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
             JOIN campaigns ca ON cm.campaign_id = ca.id
-            WHERE ccm.id = $1 AND ccm.is_enabled = true
+            LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id 
+                AND sh.end_date IS NULL
+            LEFT JOIN status s ON sh.status_id = s.id
+            WHERE ccm.id = $1
         """
         campaign = await conn.fetchrow(campaign_query, campaign_id)
         
@@ -202,12 +217,19 @@ async def download_export(
                 detail="Campaign not found"
             )
         
+        # Check if campaign is in valid status
+        if campaign['current_status'] not in ['Enabled', 'Disabled']:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Campaign is not accessible for export"
+            )
+        
         # check access
         user_role_query = "SELECT r.name FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = $1"
         user_role_row = await conn.fetchrow(user_role_query, user_id)
         user_role = user_role_row['name']
         
-        if user_role not in ['admin', 'onboarding'] and campaign['client_id'] != user_id:
+        if user_role not in ['admin', 'onboarding', 'qa'] and campaign['client_id'] != user_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied"

@@ -166,13 +166,17 @@ async def get_client_campaign(
         # verify user has access to this campaign
         access_query = """
             SELECT ccm.id, ccm.client_id, c.name as client_name,
-                   ca.name as campaign_name, m.name as model_name, ccm.is_active
+                   ca.name as campaign_name, m.name as model_name, ccm.is_active,
+                   s.status_name as current_status
             FROM client_campaign_model ccm
             JOIN clients c ON ccm.client_id = c.client_id
             JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
             JOIN campaigns ca ON cm.campaign_id = ca.id
             JOIN models m ON cm.model_id = m.id
-            WHERE ccm.id = $1 AND ccm.is_enabled = true
+            LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id 
+                AND sh.end_date IS NULL
+            LEFT JOIN status s ON sh.status_id = s.id
+            WHERE ccm.id = $1
         """
         campaign = await conn.fetchrow(access_query, campaign_id)
         
@@ -180,6 +184,13 @@ async def get_client_campaign(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Campaign not found"
+            )
+        
+        # Check if campaign is in valid status (Enabled)
+        if campaign['current_status'] not in ['Enabled']:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Campaign is not enabled"
             )
         
         # check user owns this campaign (unless admin/onboarding)
@@ -414,16 +425,20 @@ async def get_admin_campaign_dashboard(
     pool = await get_db()
     
     async with pool.acquire() as conn:
-        # verify campaign exists
+        # verify campaign exists (admin can see all statuses)
         access_query = """
             SELECT ccm.id, ccm.client_id, c.name as client_name,
-                   ca.name as campaign_name, m.name as model_name, ccm.is_active
+                   ca.name as campaign_name, m.name as model_name, ccm.is_active,
+                   s.status_name as current_status
             FROM client_campaign_model ccm
             JOIN clients c ON ccm.client_id = c.client_id
             JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
             JOIN campaigns ca ON cm.campaign_id = ca.id
             JOIN models m ON cm.model_id = m.id
-            WHERE ccm.id = $1 AND ccm.is_enabled = true
+            LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id 
+                AND sh.end_date IS NULL
+            LEFT JOIN status s ON sh.status_id = s.id
+            WHERE ccm.id = $1
         """
         campaign = await conn.fetchrow(access_query, campaign_id)
         

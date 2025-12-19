@@ -196,10 +196,14 @@ async def fetch_campaign_recordings(
     async with pool.acquire() as conn:
         # Verify campaign exists and user has access
         campaign_query = """
-            SELECT ccm.id, ccm.client_id, c.name as client_name
+            SELECT ccm.id, ccm.client_id, c.name as client_name,
+                   s.status_name as current_status
             FROM client_campaign_model ccm
             JOIN clients c ON ccm.client_id = c.client_id
-            WHERE ccm.id = $1 AND ccm.is_enabled = true
+            LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id 
+                AND sh.end_date IS NULL
+            LEFT JOIN status s ON sh.status_id = s.id
+            WHERE ccm.id = $1
         """
         campaign = await conn.fetchrow(campaign_query, campaign_id)
         
@@ -207,6 +211,13 @@ async def fetch_campaign_recordings(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Campaign not found"
+            )
+        
+        # Check if campaign is in valid status (Enabled or Disabled)
+        if campaign['current_status'] not in ['Enabled', 'Disabled']:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Campaign is not accessible"
             )
         
         # Check user has access to this campaign
