@@ -1,7 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict
-from datetime import datetime, date, time
+from datetime import datetime, time
+import csv
+import io
 from core.dependencies import require_roles
 from database.db import get_db
 
@@ -57,6 +60,37 @@ class OverallVoiceStatsResponse(BaseModel):
     voice_stats: List[VoiceOverallStats]
 
 
+
+class CallStageData(BaseModel):
+    stage: int
+    transcription: Optional[str]
+    response_category: Optional[str]
+    voice_name: Optional[str]
+    transferred: bool
+    timestamp: datetime
+
+
+class CallLookupResult(BaseModel):
+    number: str
+    campaign_id: int
+    campaign_name: str
+    model_name: str
+    client_name: str
+    stages: List[CallStageData]
+    final_response_category: Optional[str]
+    final_decision_transferred: bool
+    total_stages: int
+
+
+class CallLookupResponse(BaseModel):
+    total_numbers_searched: int
+    numbers_found: int
+    numbers_not_found: int
+    results: List[CallLookupResult]
+    not_found_numbers: List[str]
+
+
+
 # ============== HELPER FUNCTIONS ==============
 
 def calculate_transfer_rate(transferred: int, total: int) -> float:
@@ -99,6 +133,175 @@ async def build_date_filter(start_date: str, end_date: str, start_time: str, end
             pass
     
     return where_clauses, params, param_count
+
+
+def parse_csv_numbers(content: bytes) -> List[str]:
+    """Parse CSV file and extract numbers"""
+    try:
+        # Decode content
+        text = content.decode('utf-8')
+        
+        # Parse CSV
+        reader = csv.reader(io.StringIO(text))
+        numbers = []
+        
+        for row in reader:
+            # Handle each cell in the row
+            for cell in row:
+                # Clean and split by comma if needed
+                cell_numbers = [n.strip() for n in cell.split(',') if n.strip()]
+                numbers.extend(cell_numbers)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_numbers = []
+        for num in numbers:
+            if num not in seen:
+                seen.add(num)
+                unique_numbers.append(num)
+        
+        return unique_numbers
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to parse CSV file: {str(e)}"
+        )
+
+
+async def fetch_call_data(numbers: List[str], conn) -> tuple[List[CallLookupResult], List[str]]:
+    """Fetch call data for given numbers"""
+    if not numbers:
+        return [], []
+    
+    # Query to get all call stages for the given numbers
+    query = """
+        SELECT 
+            c.number,
+            c.stage,
+            c.transcription,
+            c.transferred,
+            c.timestamp,
+            c.client_campaign_model_id,
+            rc.name as response_category,
+            v.name as voice_name,
+            cl.name as client_name,
+            ca.name as campaign_name,
+            m.name as model_name
+        FROM calls c
+        LEFT JOIN response_categories rc ON c.response_category_id = rc.id
+        LEFT JOIN voices v ON c.voice_id = v.id
+        JOIN client_campaign_model ccm ON c.client_campaign_model_id = ccm.id
+        JOIN clients cl ON ccm.client_id = cl.client_id
+        JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
+        JOIN campaigns ca ON cm.campaign_id = ca.id
+        JOIN models m ON cm.model_id = m.id
+        WHERE c.number = ANY($1)
+        ORDER BY c.number, c.stage
+    """
+    
+    rows = await conn.fetch(query, numbers)
+    
+    # Group by number
+    calls_by_number = {}
+    for row in rows:
+        number = row['number']
+        if number not in calls_by_number:
+            calls_by_number[number] = {
+                'campaign_id': row['client_campaign_model_id'],
+                'campaign_name': row['campaign_name'],
+                'model_name': row['model_name'],
+                'client_name': row['client_name'],
+                'stages': []
+            }
+        
+        calls_by_number[number]['stages'].append(CallStageData(
+            stage=row['stage'],
+            transcription=row['transcription'],
+            response_category=row['response_category'],
+            voice_name=row['voice_name'],
+            transferred=row['transferred'],
+            timestamp=row['timestamp']
+        ))
+    
+    # Build results
+    results = []
+    found_numbers = set()
+    
+    for number in numbers:
+        if number in calls_by_number:
+            found_numbers.add(number)
+            call_data = calls_by_number[number]
+            stages = call_data['stages']
+            
+            # Get final stage data
+            final_stage = stages[-1] if stages else None
+            
+            results.append(CallLookupResult(
+                number=number,
+                campaign_id=call_data['campaign_id'],
+                campaign_name=call_data['campaign_name'],
+                model_name=call_data['model_name'],
+                client_name=call_data['client_name'],
+                stages=stages,
+                final_response_category=final_stage.response_category if final_stage else None,
+                final_decision_transferred=final_stage.transferred if final_stage else False,
+                total_stages=len(stages)
+            ))
+    
+    # Get numbers not found
+    not_found = [num for num in numbers if num not in found_numbers]
+    
+    return results, not_found
+
+def generate_csv_output(results: List[CallLookupResult], not_found: List[str]) -> str:
+    """Generate CSV output from call lookup results"""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Write header
+    writer.writerow([
+        'Number',
+        'Client Name',
+        'Campaign Name',
+        'Model Name',
+        'Total Stages',
+        'Stage',
+        'Transcription',
+        'Response Category',
+        'Voice',
+        'Transferred',
+        'Timestamp',
+        'Final Response Category',
+        'Final Decision (Transferred)'
+    ])
+    
+    # Write data for found numbers
+    for result in results:
+        for stage in result.stages:
+            writer.writerow([
+                result.number,
+                result.client_name,
+                result.campaign_name,
+                result.model_name,
+                result.total_stages,
+                stage.stage,
+                stage.transcription or '',
+                stage.response_category or '',
+                stage.voice_name or '',
+                'Yes' if stage.transferred else 'No',
+                stage.timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+                result.final_response_category or '',
+                'Yes' if result.final_decision_transferred else 'No'
+            ])
+    
+    # Add section for not found numbers if any
+    if not_found:
+        writer.writerow([])  # Empty row
+        writer.writerow(['Numbers Not Found'])
+        for number in not_found:
+            writer.writerow([number])
+    
+    return output.getvalue()
 
 
 # ============== ADMIN ENDPOINTS ==============
@@ -414,3 +617,106 @@ async def get_overall_voice_stats(
             overall_transfer_rate=calculate_transfer_rate(total_transferred, total_calls),
             voice_stats=voice_stats
         )
+    
+@router.post("/lookup-calls-json", response_model=CallLookupResponse)
+async def lookup_calls_json(
+    file: UploadFile = File(..., description="CSV file containing phone numbers"),
+    user_info: Dict = Depends(require_roles(["admin", "onboarding"]))
+):
+    """
+    ADMIN/ONBOARDING: LOOKUP CALL DATA BY PHONE NUMBERS (JSON RESPONSE)
+    
+    Upload a CSV file containing phone numbers (comma-separated or one per line).
+    Returns detailed call data for all stages of each number including:
+    - Transcription at each stage
+    - Response category at each stage
+    - Voice used at each stage
+    - Transfer status at each stage
+    - Final response category and decision
+    
+    Response format: JSON
+    """
+    # Validate file type
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be a CSV file"
+        )
+    
+    # Read and parse CSV
+    content = await file.read()
+    numbers = parse_csv_numbers(content)
+    
+    if not numbers:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No valid phone numbers found in CSV file"
+        )
+    
+    # Fetch call data
+    pool = await get_db()
+    async with pool.acquire() as conn:
+        results, not_found = await fetch_call_data(numbers, conn)
+    
+    return CallLookupResponse(
+        total_numbers_searched=len(numbers),
+        numbers_found=len(results),
+        numbers_not_found=len(not_found),
+        results=results,
+        not_found_numbers=not_found
+    )
+
+
+@router.post("/lookup-calls-csv")
+async def lookup_calls_csv(
+    file: UploadFile = File(..., description="CSV file containing phone numbers"),
+    user_info: Dict = Depends(require_roles(["admin", "onboarding"]))
+):
+    """
+    ADMIN/ONBOARDING: LOOKUP CALL DATA BY PHONE NUMBERS (CSV RESPONSE)
+    
+    Upload a CSV file containing phone numbers (comma-separated or one per line).
+    Returns detailed call data for all stages of each number including:
+    - Transcription at each stage
+    - Response category at each stage
+    - Voice used at each stage
+    - Transfer status at each stage
+    - Final response category and decision
+    
+    Response format: CSV file download
+    """
+    # Validate file type
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be a CSV file"
+        )
+    
+    # Read and parse CSV
+    content = await file.read()
+    numbers = parse_csv_numbers(content)
+    
+    if not numbers:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No valid phone numbers found in CSV file"
+        )
+    
+    # Fetch call data
+    pool = await get_db()
+    async with pool.acquire() as conn:
+        results, not_found = await fetch_call_data(numbers, conn)
+    
+    # Generate CSV output
+    csv_content = generate_csv_output(results, not_found)
+    
+    # Create streaming response
+    output = io.BytesIO(csv_content.encode('utf-8'))
+    
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename=call_lookup_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        }
+    )
