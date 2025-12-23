@@ -1,18 +1,19 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict
 from datetime import datetime, time
 from io import StringIO
 import csv
-from core.dependencies import get_current_user_id
+from core.dependencies import require_roles
 from database.db import get_db
 
 
 router = APIRouter(prefix="/export", tags=["Data Export"])
 
 
-# category mapping
+# ============== CATEGORY MAPPING ==============
+
 CATEGORY_MAPPING = {
     "greetingresponse": "Greeting Response",
     "notfeelinggood": "Not Feeling Good",
@@ -32,10 +33,13 @@ CATEGORY_MAPPING = {
 }
 
 
+# ============== MODELS ==============
+
 class CategoryInfo(BaseModel):
     name: str
-    combined_name: str
+    color: str
     count: int
+    original_name: str
 
 
 class ExportOptionsResponse(BaseModel):
@@ -57,57 +61,91 @@ class ExportRequest(BaseModel):
     end_time: Optional[str] = None
 
 
+# ============== HELPER FUNCTIONS ==============
+
+async def get_user_client_id(conn, user_id: int, roles: List[str]) -> Optional[int]:
+    """
+    Get the client_id that the user has access to.
+    For 'client' role: returns user_id as client_id
+    For privileged roles: returns None (can access any)
+    Note: client_member role is NOT allowed to export
+    """
+    PRIVILEGED_ROLES = ['admin', 'onboarding', 'qa']
+    
+    if any(role in PRIVILEGED_ROLES for role in roles):
+        return None
+    elif 'client' in roles:
+        return user_id
+    return None
+
+
+async def verify_export_access(conn, campaign_id: int, user_id: int, roles: List[str]) -> dict:
+    """Verify user has access to export campaign data."""
+    campaign_query = """
+        SELECT ccm.id, ccm.client_id, c.name as client_name,
+               ca.name as campaign_name, m.name as model_name,
+               s.status_name as current_status
+        FROM client_campaign_model ccm
+        JOIN clients c ON ccm.client_id = c.client_id
+        JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
+        JOIN campaigns ca ON cm.campaign_id = ca.id
+        JOIN models m ON cm.model_id = m.id
+        LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id 
+            AND sh.end_date IS NULL
+        LEFT JOIN status s ON sh.status_id = s.id
+        WHERE ccm.id = $1
+    """
+    campaign = await conn.fetchrow(campaign_query, campaign_id)
+    
+    if not campaign:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Campaign not found"
+        )
+    
+    # Only Enabled and Disabled campaigns can be exported
+    if campaign['current_status'] not in ['Enabled', 'Disabled']:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Campaign is not accessible for export"
+        )
+    
+    # Check ownership for non-privileged users
+    allowed_client_id = await get_user_client_id(conn, user_id, roles)
+    
+    # If allowed_client_id is None, user is privileged (can access any)
+    if allowed_client_id is not None and campaign['client_id'] != allowed_client_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied"
+        )
+    
+    return dict(campaign)
+
+
+# ============== ENDPOINTS ==============
+
 @router.get("/{campaign_id}/options", response_model=ExportOptionsResponse)
 async def get_export_options(
     campaign_id: int,
-    user_id: int = Depends(get_current_user_id)
+    user_info: Dict = Depends(require_roles(['admin', 'onboarding', 'client']))
 ):
-    """GET EXPORT OPTIONS - Get available filters and counts for export"""
+    """
+    Get available filters and counts for export.
+    Privileged roles: Can export any campaign
+    Client role: Can only export their own campaigns
+    Client member role: NOT allowed (not in require_roles)
+    """
+    user_id = user_info['user_id']
+    roles = user_info['roles']
+    
     pool = await get_db()
     
     async with pool.acquire() as conn:
-        # verify access to campaign
-        campaign_query = """
-            SELECT ccm.id, ccm.client_id, c.name as client_name,
-                   ca.name as campaign_name, m.name as model_name,
-                   s.status_name as current_status
-            FROM client_campaign_model ccm
-            JOIN clients c ON ccm.client_id = c.client_id
-            JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
-            JOIN campaigns ca ON cm.campaign_id = ca.id
-            JOIN models m ON cm.model_id = m.id
-            LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id 
-                AND sh.end_date IS NULL
-            LEFT JOIN status s ON sh.status_id = s.id
-            WHERE ccm.id = $1
-        """
-        campaign = await conn.fetchrow(campaign_query, campaign_id)
+        # Verify access
+        campaign = await verify_export_access(conn, campaign_id, user_id, roles)
         
-        if not campaign:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Campaign not found"
-            )
-        
-        # Check if campaign is in valid status
-        if campaign['current_status'] not in ['Enabled', 'Disabled']:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Campaign is not accessible for export"
-            )
-        
-        # check user owns campaign (unless admin/onboarding)
-        user_role_query = "SELECT r.name FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = $1"
-        user_role_row = await conn.fetchrow(user_role_query, user_id)
-        user_role = user_role_row['name']
-        
-        if user_role not in ['admin', 'onboarding', 'qa'] and campaign['client_id'] != user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
-            )
-        
-        # get unique list IDs
+        # Get unique list IDs
         list_ids_query = """
             SELECT DISTINCT list_id
             FROM calls
@@ -119,7 +157,7 @@ async def get_export_options(
         list_ids_rows = await conn.fetch(list_ids_query, campaign_id)
         list_ids = [row['list_id'] for row in list_ids_rows]
         
-        # get latest stage for each number
+        # Get latest stage for each number
         latest_stages_query = """
             SELECT number, MAX(stage) as max_stage
             FROM calls
@@ -129,51 +167,67 @@ async def get_export_options(
         latest_stages_rows = await conn.fetch(latest_stages_query, campaign_id)
         latest_stages = {row['number']: row['max_stage'] for row in latest_stages_rows}
         
-        # get all calls at latest stage
+        # Get all calls at latest stage
         all_calls_query = """
-            SELECT c.number, c.stage, rc.name as category_name
+            SELECT c.number, c.stage, rc.name as category_name, rc.color as category_color
             FROM calls c
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             WHERE c.client_campaign_model_id = $1
         """
         all_calls = await conn.fetch(all_calls_query, campaign_id)
         
-        # filter to latest stage only
+        # Filter to latest stage only
         latest_stage_calls = []
         for call in all_calls:
             if call['number'] in latest_stages and call['stage'] == latest_stages[call['number']]:
                 latest_stage_calls.append(call)
         
-        # get all categories from database
-        categories_query = "SELECT name FROM response_categories ORDER BY name"
+        # Get all categories from database
+        categories_query = "SELECT id, name, color FROM response_categories ORDER BY name"
         db_categories = await conn.fetch(categories_query)
         
-        # count categories
-        category_count_dict = {}
+        # Count categories from filtered calls
+        category_counts_raw = {}
         for call in latest_stage_calls:
             if call['category_name']:
                 cat_name = call['category_name']
-                category_count_dict[cat_name] = category_count_dict.get(cat_name, 0) + 1
+                if cat_name not in category_counts_raw:
+                    category_counts_raw[cat_name] = {
+                        'name': cat_name,
+                        'color': call['category_color'] or '#6B7280',
+                        'count': 0
+                    }
+                category_counts_raw[cat_name]['count'] += 1
         
-        # combine categories
+        # Initialize combined counts and colors
         combined_counts = {}
+        category_colors = {}
+        
+        # First, initialize all categories from database with 0 counts
         for db_cat in db_categories:
             original_name = db_cat['name'] or 'UNKNOWN'
             combined_name = CATEGORY_MAPPING.get(original_name, original_name)
-            count = category_count_dict.get(original_name, 0)
             
-            if combined_name in combined_counts:
-                combined_counts[combined_name] += count
-            else:
-                combined_counts[combined_name] = count
+            if combined_name not in combined_counts:
+                combined_counts[combined_name] = 0
+                category_colors[combined_name] = db_cat['color'] or '#6B7280'
         
-        # build categories list
+        # Then, add actual counts from calls
+        for cat_data in category_counts_raw.values():
+            original_name = cat_data['name']
+            combined_name = CATEGORY_MAPPING.get(original_name, original_name)
+            combined_counts[combined_name] += cat_data['count']
+            if not category_colors.get(combined_name):
+                category_colors[combined_name] = cat_data['color']
+        
+        # Build categories list
         all_categories = []
         for combined_name in sorted(combined_counts.keys()):
             all_categories.append(CategoryInfo(
                 name=combined_name.capitalize(),
-                combined_name=combined_name,
-                count=combined_counts[combined_name]
+                color=category_colors.get(combined_name, '#6B7280'),
+                count=combined_counts[combined_name],
+                original_name=combined_name
             ))
         
         return ExportOptionsResponse(
@@ -191,51 +245,24 @@ async def get_export_options(
 async def download_export(
     campaign_id: int,
     export_request: ExportRequest,
-    user_id: int = Depends(get_current_user_id)
+    user_info: Dict = Depends(require_roles(['admin', 'onboarding', 'client']))
 ):
-    """POST DOWNLOAD EXPORT - Generate and download CSV file"""
+    """
+    Generate and download CSV file.
+    Privileged roles: Can export any campaign
+    Client role: Can only export their own campaigns
+    Client member role: NOT allowed (not in require_roles)
+    """
+    user_id = user_info['user_id']
+    roles = user_info['roles']
+    
     pool = await get_db()
     
     async with pool.acquire() as conn:
-        # verify access
-        campaign_query = """
-            SELECT ccm.id, ccm.client_id, ca.name as campaign_name,
-                   s.status_name as current_status
-            FROM client_campaign_model ccm
-            JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
-            JOIN campaigns ca ON cm.campaign_id = ca.id
-            LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id 
-                AND sh.end_date IS NULL
-            LEFT JOIN status s ON sh.status_id = s.id
-            WHERE ccm.id = $1
-        """
-        campaign = await conn.fetchrow(campaign_query, campaign_id)
+        # Verify access
+        campaign = await verify_export_access(conn, campaign_id, user_id, roles)
         
-        if not campaign:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Campaign not found"
-            )
-        
-        # Check if campaign is in valid status
-        if campaign['current_status'] not in ['Enabled', 'Disabled']:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Campaign is not accessible for export"
-            )
-        
-        # check access
-        user_role_query = "SELECT r.name FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = $1"
-        user_role_row = await conn.fetchrow(user_role_query, user_id)
-        user_role = user_role_row['name']
-        
-        if user_role not in ['admin', 'onboarding', 'qa'] and campaign['client_id'] != user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
-            )
-        
-        # get latest stages
+        # Get latest stages
         latest_stages_query = """
             SELECT number, MAX(stage) as max_stage
             FROM calls
@@ -245,7 +272,7 @@ async def download_export(
         latest_stages_rows = await conn.fetch(latest_stages_query, campaign_id)
         latest_stages = {row['number']: row['max_stage'] for row in latest_stages_rows}
         
-        # build query with filters
+        # Build query with filters
         where_clauses = ["c.client_campaign_model_id = $1"]
         params = [campaign_id]
         param_count = 1
@@ -256,13 +283,14 @@ async def download_export(
             params.append(export_request.list_ids)
         
         if export_request.categories:
-            # reverse category mapping
+            # Create reverse mapping to get original category names
             reverse_mapping = {}
             for orig, combined in CATEGORY_MAPPING.items():
                 if combined not in reverse_mapping:
                     reverse_mapping[combined] = []
                 reverse_mapping[combined].append(orig)
             
+            # Convert selected combined categories back to original names
             original_names = []
             for cat in export_request.categories:
                 if cat in reverse_mapping:
@@ -301,7 +329,7 @@ async def download_export(
             except ValueError:
                 pass
         
-        # fetch calls
+        # Fetch calls
         calls_query = f"""
             SELECT c.id, c.number, c.list_id, c.timestamp, c.stage,
                    c.transferred, c.transcription,
@@ -314,13 +342,13 @@ async def download_export(
         """
         all_calls = await conn.fetch(calls_query, *params)
         
-        # filter to latest stage
+        # Filter to latest stage
         filtered_calls = []
         for call in all_calls:
             if call['number'] in latest_stages and call['stage'] == latest_stages[call['number']]:
                 filtered_calls.append(call)
         
-        # create csv in memory
+        # Create CSV in memory
         output = StringIO()
         writer = csv.writer(output)
         writer.writerow([
@@ -344,7 +372,7 @@ async def download_export(
                 call['transcription'] or ''
             ])
         
-        # prepare response
+        # Prepare response
         output.seek(0)
         filename = f"call_data_{campaign['campaign_name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         
