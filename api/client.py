@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict
 from datetime import datetime
-from core.dependencies import get_current_user_id
+from core.dependencies import require_roles
 from database.db import get_db
 
 
@@ -24,7 +24,6 @@ class ModelInfo(BaseModel):
     id: int
     name: str
     description: Optional[str]
-    transfer_settings: List[TransferSettingsInfo]
 
 
 class CampaignInfo(BaseModel):
@@ -50,6 +49,7 @@ class ClientCampaignResponse(BaseModel):
     id: int
     campaign: CampaignInfo
     model: ModelInfo
+    transfer_setting: Optional[TransferSettingsInfo]
     start_date: datetime
     end_date: Optional[datetime]
     is_active: bool
@@ -67,44 +67,62 @@ class ClientCampaignsListResponse(BaseModel):
     inactive_campaigns: int
 
 
-# ============== ENDPOINT ==============
+# ============== HELPER FUNCTIONS ==============
+
+async def get_user_client_id(conn, user_id: int, roles: List[str]) -> Optional[int]:
+    """
+    Get the client_id that the user has access to.
+    For 'client' role: returns user_id as client_id
+    For 'client_member' role: returns employer's client_id
+    For privileged roles: returns None (can access any)
+    """
+    PRIVILEGED_ROLES = ['admin', 'onboarding', 'qa']
+    
+    if any(role in PRIVILEGED_ROLES for role in roles):
+        return None
+    elif 'client' in roles:
+        return user_id
+    elif 'client_member' in roles:
+        employer_query = "SELECT client_id FROM client_employees WHERE user_id = $1"
+        employer = await conn.fetchrow(employer_query, user_id)
+        if employer:
+            return employer['client_id']
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No employer association found"
+        )
+    return None
+
+
+# ============== ENDPOINTS ==============
 
 @router.get("/{client_id}", response_model=ClientCampaignsListResponse)
 async def get_client_campaigns(
     client_id: int,
-    user_id: int = Depends(get_current_user_id)
+    user_info: Dict = Depends(require_roles(['admin', 'onboarding', 'qa', 'client', 'client_member']))
 ):
     """
-    GET CLIENT CAMPAIGNS - Returns all campaigns for the specified client.
-    - Regular clients can only access their own enabled campaigns
-    - Admin, onboarding, and QA roles can access any client's campaigns (excluding archived)
+    Get all campaigns for the specified client.
+    Privileged roles: Can access any client's campaigns (excluding archived)
+    Client role: Can only access their own enabled campaigns
+    Client member role: Can only access their employer's enabled campaigns
     """
+    PRIVILEGED_ROLES = ['admin', 'onboarding', 'qa']
+    
+    user_id = user_info['user_id']
+    roles = user_info['roles']
+    
     pool = await get_db()
     
     async with pool.acquire() as conn:
-        # Get user's role
-        user_role_query = """
-            SELECT r.name
-            FROM users u
-            JOIN roles r ON u.role_id = r.id
-            WHERE u.id = $1
-        """
-        user_data = await conn.fetchrow(user_role_query, user_id)
+        # Check access
+        allowed_client_id = await get_user_client_id(conn, user_id, roles)
         
-        if not user_data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
-        
-        user_role = user_data['name']
-        is_privileged = user_role in ['admin', 'onboarding', 'qa']
-        
-        # Check access: if not privileged role, must be requesting own campaigns
-        if not is_privileged and client_id != user_id:
+        # If allowed_client_id is not None and doesn't match, deny access
+        if allowed_client_id is not None and client_id != allowed_client_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied. You can only view your own campaigns."
+                detail="Access denied"
             )
         
         # Get client information
@@ -113,7 +131,6 @@ async def get_client_campaigns(
             FROM clients c
             WHERE c.client_id = $1
         """
-        
         client_data = await conn.fetchrow(client_query, client_id)
         
         if not client_data:
@@ -124,69 +141,51 @@ async def get_client_campaigns(
         
         client_name = client_data['name']
         
-        # Build query based on role - matching Django view logic
-        if is_privileged:
-            # Admin/onboarding/QA see all campaigns except 'Archived'
-            campaigns_query = """
-                SELECT 
-                    ccm.id as campaign_id,
-                    ccm.start_date,
-                    ccm.end_date,
-                    ccm.is_active,
-                    ccm.bot_count,
-                    ca.id as camp_id,
-                    ca.name as camp_name,
-                    ca.description as camp_desc,
-                    m.id as model_id,
-                    m.name as model_name,
-                    m.description as model_desc,
-                    sh.id as status_history_id,
-                    sh.start_date as status_start,
-                    sh.end_date as status_end,
-                    s.id as status_id,
-                    s.status_name
-                FROM client_campaign_model ccm
-                JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
-                JOIN campaigns ca ON cm.campaign_id = ca.id
-                JOIN models m ON cm.model_id = m.id
-                LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id 
-                    AND sh.end_date IS NULL
-                LEFT JOIN status s ON sh.status_id = s.id
-                WHERE ccm.client_id = $1 
-                    AND (s.status_name != 'Archived' OR s.status_name IS NULL)
-                ORDER BY ccm.start_date DESC
-            """
-        else:
-            # Regular clients only see 'Enabled' campaigns
-            campaigns_query = """
-                SELECT 
-                    ccm.id as campaign_id,
-                    ccm.start_date,
-                    ccm.end_date,
-                    ccm.is_active,
-                    ccm.bot_count,
-                    ca.id as camp_id,
-                    ca.name as camp_name,
-                    ca.description as camp_desc,
-                    m.id as model_id,
-                    m.name as model_name,
-                    m.description as model_desc,
-                    sh.id as status_history_id,
-                    sh.start_date as status_start,
-                    sh.end_date as status_end,
-                    s.id as status_id,
-                    s.status_name
-                FROM client_campaign_model ccm
-                JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
-                JOIN campaigns ca ON cm.campaign_id = ca.id
-                JOIN models m ON cm.model_id = m.id
-                LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id 
-                    AND sh.end_date IS NULL
-                LEFT JOIN status s ON sh.status_id = s.id
-                WHERE ccm.client_id = $1 AND s.status_name = 'Enabled'
-                ORDER BY ccm.start_date DESC
-            """
+        # Build campaign query based on role
+        is_privileged = any(role in PRIVILEGED_ROLES for role in roles)
         
+        if is_privileged:
+            # Exclude archived campaigns
+            status_filter = "AND (s.status_name != 'Archived' OR s.status_name IS NULL)"
+        else:
+            # Only show enabled campaigns
+            status_filter = "AND s.status_name = 'Enabled'"
+        
+        campaigns_query = f"""
+            SELECT 
+                ccm.id as campaign_id,
+                ccm.start_date,
+                ccm.end_date,
+                ccm.is_active,
+                ccm.bot_count,
+                ca.id as camp_id,
+                ca.name as camp_name,
+                ca.description as camp_desc,
+                m.id as model_id,
+                m.name as model_name,
+                m.description as model_desc,
+                ts.id as ts_id,
+                ts.name as ts_name,
+                ts.description as ts_desc,
+                ts.is_recommended,
+                ts.quality_score,
+                ts.volume_score,
+                sh.id as status_history_id,
+                sh.start_date as status_start,
+                sh.end_date as status_end,
+                s.id as status_id,
+                s.status_name
+            FROM client_campaign_model ccm
+            JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
+            JOIN campaigns ca ON cm.campaign_id = ca.id
+            JOIN models m ON cm.model_id = m.id
+            LEFT JOIN transfer_settings ts ON ccm.selected_transfer_setting_id = ts.id
+            LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id 
+                AND sh.end_date IS NULL
+            LEFT JOIN status s ON sh.status_id = s.id
+            WHERE ccm.client_id = $1 {status_filter}
+            ORDER BY ccm.start_date DESC
+        """
         campaigns_data = await conn.fetch(campaigns_query, client_id)
         
         if not campaigns_data:
@@ -199,29 +198,10 @@ async def get_client_campaigns(
                 inactive_campaigns=0
             )
         
-        # Get all model IDs and campaign IDs for batch queries
-        model_ids = list(set([c['model_id'] for c in campaigns_data]))
+        # Get campaign IDs for call stats
         campaign_ids = [c['campaign_id'] for c in campaigns_data]
         
-        # Fetch transfer settings for all models
-        transfer_settings_query = """
-            SELECT 
-                m.id as model_id,
-                ts.id as ts_id,
-                ts.name as ts_name,
-                ts.description as ts_desc,
-                ts.is_recommended,
-                ts.quality_score,
-                ts.volume_score
-            FROM models m
-            JOIN models_transfer_settings mts ON m.id = mts.model_id
-            JOIN transfer_settings ts ON mts.transfersettings_id = ts.id
-            WHERE m.id = ANY($1)
-            ORDER BY ts.display_order, ts.name
-        """
-        transfer_settings_data = await conn.fetch(transfer_settings_query, model_ids)
-        
-        # Fetch call statistics for all campaigns
+        # Fetch call statistics
         call_stats_query = """
             SELECT 
                 client_campaign_model_id,
@@ -232,22 +212,6 @@ async def get_client_campaigns(
             GROUP BY client_campaign_model_id
         """
         call_stats_data = await conn.fetch(call_stats_query, campaign_ids)
-        
-        # Group transfer settings by model_id
-        transfer_settings_by_model = {}
-        for ts in transfer_settings_data:
-            model_id = ts['model_id']
-            if model_id not in transfer_settings_by_model:
-                transfer_settings_by_model[model_id] = []
-            
-            transfer_settings_by_model[model_id].append(TransferSettingsInfo(
-                id=ts['ts_id'],
-                name=ts['ts_name'],
-                description=ts['ts_desc'],
-                is_recommended=ts['is_recommended'],
-                quality_score=ts['quality_score'],
-                volume_score=ts['volume_score']
-            ))
         
         # Group call stats by campaign_id
         call_stats_by_campaign = {}
@@ -271,9 +235,6 @@ async def get_client_campaigns(
         active_count = 0
         
         for camp in campaigns_data:
-            model_transfer_settings = transfer_settings_by_model.get(camp['model_id'], [])
-            
-            # Get call stats or use defaults
             call_stats = call_stats_by_campaign.get(
                 camp['campaign_id'],
                 CampaignCallStats(
@@ -283,7 +244,6 @@ async def get_client_campaigns(
                 )
             )
             
-            # Count active campaigns
             if camp['is_active']:
                 active_count += 1
             
@@ -296,6 +256,17 @@ async def get_client_campaigns(
                     end_date=camp['status_end']
                 )
             
+            transfer_setting_info = None
+            if camp['ts_id']:
+                transfer_setting_info = TransferSettingsInfo(
+                    id=camp['ts_id'],
+                    name=camp['ts_name'],
+                    description=camp['ts_desc'],
+                    is_recommended=camp['is_recommended'],
+                    quality_score=camp['quality_score'],
+                    volume_score=camp['volume_score']
+                )
+            
             campaigns_list.append(ClientCampaignResponse(
                 id=camp['campaign_id'],
                 campaign=CampaignInfo(
@@ -306,9 +277,9 @@ async def get_client_campaigns(
                 model=ModelInfo(
                     id=camp['model_id'],
                     name=camp['model_name'],
-                    description=camp['model_desc'],
-                    transfer_settings=model_transfer_settings
+                    description=camp['model_desc']
                 ),
+                transfer_setting=transfer_setting_info,
                 start_date=camp['start_date'],
                 end_date=camp['end_date'],
                 is_active=camp['is_active'],
@@ -328,3 +299,43 @@ async def get_client_campaigns(
             active_campaigns=active_count,
             inactive_campaigns=inactive_count
         )
+
+
+@router.get("/employer")
+async def get_client_member_employer(
+    user_info: Dict = Depends(require_roles(['client_member']))
+):
+    """
+    Get employer client information for the authenticated employee user.
+    Only accessible by client_member role.
+    """
+    user_id = user_info['user_id']
+    
+    pool = await get_db()
+    
+    async with pool.acquire() as conn:
+        # Get employer information
+        employer_query = """
+            SELECT 
+                ce.client_id,
+                c.name as client_name,
+                u.username
+            FROM client_employees ce
+            JOIN clients c ON ce.client_id = c.client_id
+            JOIN users u ON ce.user_id = u.id
+            WHERE ce.user_id = $1
+        """
+        employer_data = await conn.fetchrow(employer_query, user_id)
+        
+        if not employer_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No employer association found"
+            )
+        
+        return {
+            "client_id": employer_data['client_id'],
+            "client_name": employer_data['client_name'],
+            "user_id": user_id,
+            "username": employer_data['username']
+        }
