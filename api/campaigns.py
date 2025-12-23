@@ -2,14 +2,15 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 from datetime import datetime, date, time
-from core.dependencies import get_current_user_id, require_roles
+from core.dependencies import require_roles
 from database.db import get_db
 
 
 router = APIRouter(prefix="/campaigns", tags=["Campaigns"])
 
 
-# Client category mapping 
+# ============== CATEGORY MAPPINGS ==============
+
 CLIENT_CATEGORY_MAPPING = {
     "greetingresponse": "Greeting Response",
     "notfeelinggood": "Not Feeling Good",
@@ -28,8 +29,6 @@ CLIENT_CATEGORY_MAPPING = {
     "repeatpitch": "Repeat Pitch"
 }
 
-
-# Admin category mapping (same for now, but separate)
 ADMIN_CATEGORY_MAPPING = {
     "greetingresponse": "Greeting Response",
     "notfeelinggood": "Not Feeling Good",
@@ -143,12 +142,74 @@ class AdminCampaignDashboardResponse(BaseModel):
     pagination: PaginationInfo
 
 
+# ============== HELPER FUNCTIONS ==============
+
+async def get_user_client_id(conn, user_id: int, roles: List[str]) -> Optional[int]:
+    """
+    Get the client_id that the user has access to.
+    For 'client' role: returns user_id as client_id
+    For 'client_member' role: returns employer's client_id
+    For other roles: returns None (they can access any)
+    """
+    if 'client' in roles:
+        return user_id
+    elif 'client_member' in roles:
+        employer_query = "SELECT client_id FROM client_employees WHERE user_id = $1"
+        employer = await conn.fetchrow(employer_query, user_id)
+        if employer:
+            return employer['client_id']
+    return None
+
+
+async def verify_campaign_access(conn, campaign_id: int, user_id: int, roles: List[str], allowed_statuses: List[str]) -> dict:
+    """Verify user has access to campaign and return campaign data."""
+    access_query = """
+        SELECT ccm.id, ccm.client_id, c.name as client_name,
+               ca.name as campaign_name, m.name as model_name, ccm.is_active,
+               s.status_name as current_status
+        FROM client_campaign_model ccm
+        JOIN clients c ON ccm.client_id = c.client_id
+        JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
+        JOIN campaigns ca ON cm.campaign_id = ca.id
+        JOIN models m ON cm.model_id = m.id
+        LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id 
+            AND sh.end_date IS NULL
+        LEFT JOIN status s ON sh.status_id = s.id
+        WHERE ccm.id = $1
+    """
+    campaign = await conn.fetchrow(access_query, campaign_id)
+    
+    if not campaign:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Campaign not found"
+        )
+    
+    if campaign['current_status'] not in allowed_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Campaign is not accessible"
+        )
+    
+    # Get allowed client_id for non-privileged users
+    allowed_client_id = await get_user_client_id(conn, user_id, roles)
+    
+    # If allowed_client_id is None, user is privileged (can access any)
+    if allowed_client_id is not None and campaign['client_id'] != allowed_client_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied"
+        )
+    
+    return dict(campaign)
+
+
 # ============== CLIENT ENDPOINT ==============
 
 @router.get("/{campaign_id}/dashboard", response_model=CampaignDashboardResponse)
 async def get_client_campaign(
     campaign_id: int,
-    user_id: int = Depends(get_current_user_id),
+    user_info: Dict = Depends(require_roles(['admin', 'onboarding', 'client', 'client_member'])),
     search: str = Query("", description="Search by number or category"),
     list_id: str = Query("", description="Filter by list ID"),
     start_date: str = Query("", description="Start date YYYY-MM-DD"),
@@ -159,59 +220,31 @@ async def get_client_campaign(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(50, ge=1, le=500, description="Records per page")
 ):
-    """GET CLIENT CAMPAIGN DASHBOARD - Show call records with filters (latest stage only)"""
+    """Get client campaign dashboard with call records (latest stage only)."""
+    # Privileged roles that can see any campaign with any status
+    PRIVILEGED_ROLES = ['admin', 'onboarding', 'qa']
+    
+    user_id = user_info['user_id']
+    roles = user_info['roles']
+    
+    # Determine allowed statuses based on roles
+    is_privileged = any(role in PRIVILEGED_ROLES for role in roles)
+    allowed_statuses = ['Enabled', 'Disabled'] if is_privileged else ['Enabled']
+    
     pool = await get_db()
     
     async with pool.acquire() as conn:
-        # verify user has access to this campaign
-        access_query = """
-            SELECT ccm.id, ccm.client_id, c.name as client_name,
-                   ca.name as campaign_name, m.name as model_name, ccm.is_active,
-                   s.status_name as current_status
-            FROM client_campaign_model ccm
-            JOIN clients c ON ccm.client_id = c.client_id
-            JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
-            JOIN campaigns ca ON cm.campaign_id = ca.id
-            JOIN models m ON cm.model_id = m.id
-            LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id 
-                AND sh.end_date IS NULL
-            LEFT JOIN status s ON sh.status_id = s.id
-            WHERE ccm.id = $1
-        """
-        campaign = await conn.fetchrow(access_query, campaign_id)
+        # Verify access
+        campaign = await verify_campaign_access(conn, campaign_id, user_id, roles, allowed_statuses)
         
-        if not campaign:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Campaign not found"
-            )
-        
-        # Check if campaign is in valid status (Enabled)
-        if campaign['current_status'] not in ['Enabled']:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Campaign is not enabled"
-            )
-        
-        # check user owns this campaign (unless admin/onboarding)
-        user_role_query = "SELECT r.name FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = $1"
-        user_role_row = await conn.fetchrow(user_role_query, user_id)
-        user_role = user_role_row['name']
-        
-        if user_role not in ['admin', 'onboarding'] and campaign['client_id'] != user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
-            )
-        
-        # default to today if no filters
+        # Default to today if no filters
         has_any_filter = any([search, list_id, start_date, end_date, categories])
         if not has_any_filter:
             today = date.today()
             start_date = today.strftime('%Y-%m-%d')
             end_date = today.strftime('%Y-%m-%d')
         
-        # get latest stage for each number
+        # Get latest stage for each number
         latest_stages_query = """
             SELECT number, MAX(stage) as max_stage
             FROM calls
@@ -221,7 +254,7 @@ async def get_client_campaign(
         latest_stages_rows = await conn.fetch(latest_stages_query, campaign_id)
         latest_stages = {row['number']: row['max_stage'] for row in latest_stages_rows}
         
-        # build base query for calls
+        # Build query with filters
         where_clauses = ["c.client_campaign_model_id = $1"]
         params = [campaign_id]
         param_count = 1
@@ -262,7 +295,6 @@ async def get_client_campaign(
             except ValueError:
                 pass
         
-        # handle category filter with mapping
         if categories:
             reverse_mapping = {}
             for orig, combined in CLIENT_CATEGORY_MAPPING.items():
@@ -282,7 +314,6 @@ async def get_client_campaign(
                 where_clauses.append(f"rc.name = ANY(${param_count})")
                 params.append(original_names)
         
-        # fetch all calls matching filters
         calls_query = f"""
             SELECT c.id, c.number, c.list_id, c.timestamp, c.stage,
                    c.transcription, rc.name as category_name, rc.color as category_color,
@@ -295,26 +326,23 @@ async def get_client_campaign(
         """
         all_calls = await conn.fetch(calls_query, *params)
         
-        # filter to latest stage only
+        # Filter to latest stage only
         filtered_calls = []
         for call in all_calls:
             if call['number'] in latest_stages and call['stage'] == latest_stages[call['number']]:
                 filtered_calls.append(call)
         
-        # calculate pagination
+        # Pagination
         total_calls = len(filtered_calls)
         total_pages = (total_calls + page_size - 1) // page_size if total_calls > 0 else 1
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
         paginated_calls = filtered_calls[start_idx:end_idx]
         
-        # get all categories with counts
-        all_categories_query = """
-            SELECT id, name, color FROM response_categories ORDER BY name
-        """
+        # Get categories with counts
+        all_categories_query = "SELECT id, name, color FROM response_categories ORDER BY name"
         db_categories = await conn.fetch(all_categories_query)
         
-        # count categories from filtered calls
         category_counts_raw = {}
         for call in filtered_calls:
             if call['category_name']:
@@ -327,7 +355,6 @@ async def get_client_campaign(
                     }
                 category_counts_raw[cat_name]['count'] += 1
         
-        # combine categories according to mapping
         combined_counts = {}
         category_colors = {}
         
@@ -346,7 +373,6 @@ async def get_client_campaign(
             if not category_colors.get(combined_name):
                 category_colors[combined_name] = cat_data['color']
         
-        # build category list
         all_categories = []
         for combined_name in sorted(combined_counts.keys()):
             all_categories.append(CategoryCount(
@@ -356,7 +382,6 @@ async def get_client_campaign(
                 original_name=combined_name
             ))
         
-        # format calls for response
         calls_data = []
         for call in paginated_calls:
             original_category = call['category_name'] or 'Unknown'
@@ -410,7 +435,7 @@ async def get_client_campaign(
 @router.get("/admin/{campaign_id}/dashboard", response_model=AdminCampaignDashboardResponse)
 async def get_admin_campaign_dashboard(
     campaign_id: int,
-    user_info: Dict = Depends(require_roles(["admin", "onboarding", "qa"])),
+    user_info: Dict = Depends(require_roles(['admin', 'onboarding', 'qa'])),
     search: str = Query("", description="Search by number or category"),
     list_id: str = Query("", description="Filter by list ID"),
     start_date: str = Query("", description="Start date YYYY-MM-DD"),
@@ -421,11 +446,11 @@ async def get_admin_campaign_dashboard(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(50, ge=1, le=500, description="Records per page")
 ):
-    """GET ADMIN CAMPAIGN DASHBOARD - Show detailed call records with all stages and transcriptions"""
+    """Get admin campaign dashboard with detailed call records including all stages."""
     pool = await get_db()
     
     async with pool.acquire() as conn:
-        # verify campaign exists (admin can see all statuses)
+        # Admin can see all statuses, no ownership check needed
         access_query = """
             SELECT ccm.id, ccm.client_id, c.name as client_name,
                    ca.name as campaign_name, m.name as model_name, ccm.is_active,
@@ -448,14 +473,14 @@ async def get_admin_campaign_dashboard(
                 detail="Campaign not found"
             )
         
-        # default to today if no filters
+        # Default to today if no filters
         has_any_filter = any([search, list_id, start_date, end_date, categories])
         if not has_any_filter:
             today = date.today()
             start_date = today.strftime('%Y-%m-%d')
             end_date = today.strftime('%Y-%m-%d')
         
-        # build base query for calls
+        # Build query
         where_clauses = ["c.client_campaign_model_id = $1"]
         params = [campaign_id]
         param_count = 1
@@ -496,7 +521,6 @@ async def get_admin_campaign_dashboard(
             except ValueError:
                 pass
         
-        # handle category filter with mapping
         if categories:
             reverse_mapping = {}
             for orig, combined in ADMIN_CATEGORY_MAPPING.items():
@@ -516,7 +540,6 @@ async def get_admin_campaign_dashboard(
                 where_clauses.append(f"rc.name = ANY(${param_count})")
                 params.append(original_names)
         
-        # fetch all calls matching filters
         calls_query = f"""
             SELECT c.id, c.number, c.list_id, c.timestamp, c.stage, c.transferred,
                    c.transcription, rc.name as category_name, rc.color as category_color,
@@ -529,7 +552,7 @@ async def get_admin_campaign_dashboard(
         """
         all_calls = await conn.fetch(calls_query, *params)
         
-        # group calls by number
+        # Group by number
         calls_by_number = {}
         for call in all_calls:
             number = call['number']
@@ -537,20 +560,17 @@ async def get_admin_campaign_dashboard(
                 calls_by_number[number] = []
             calls_by_number[number].append(call)
         
-        # calculate pagination
+        # Pagination
         total_calls = len(calls_by_number)
         total_pages = (total_calls + page_size - 1) // page_size if total_calls > 0 else 1
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
         paginated_numbers = list(calls_by_number.items())[start_idx:end_idx]
         
-        # get all categories with counts (based on latest stage only)
-        all_categories_query = """
-            SELECT id, name, color FROM response_categories ORDER BY name
-        """
+        # Get categories
+        all_categories_query = "SELECT id, name, color FROM response_categories ORDER BY name"
         db_categories = await conn.fetch(all_categories_query)
         
-        # count categories from latest stage of each number
         category_counts_raw = {}
         for number, stages in calls_by_number.items():
             latest_call = stages[-1]
@@ -564,7 +584,6 @@ async def get_admin_campaign_dashboard(
                     }
                 category_counts_raw[cat_name]['count'] += 1
         
-        # combine categories according to mapping
         combined_counts = {}
         category_colors = {}
         
@@ -583,7 +602,6 @@ async def get_admin_campaign_dashboard(
             if not category_colors.get(combined_name):
                 category_colors[combined_name] = cat_data['color']
         
-        # build category list
         all_categories = []
         for combined_name in sorted(combined_counts.keys()):
             all_categories.append(CategoryCount(
@@ -593,7 +611,7 @@ async def get_admin_campaign_dashboard(
                 original_name=combined_name
             ))
         
-        # format detailed calls for response
+        # Format detailed calls
         calls_data = []
         for number, stages in paginated_numbers:
             latest_call = stages[-1]
@@ -602,7 +620,6 @@ async def get_admin_campaign_dashboard(
             original_category = latest_call['category_name'] or 'Unknown'
             combined_category = ADMIN_CATEGORY_MAPPING.get(original_category, original_category)
             
-            # build stage details
             stage_details = []
             for stage_call in stages:
                 stage_category = stage_call['category_name'] or 'Unknown'

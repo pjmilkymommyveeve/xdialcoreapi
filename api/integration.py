@@ -326,20 +326,21 @@ async def submit_integration_request(request: IntegrationRequest):
                 sh_row = await conn.fetchrow(status_history_query, status_id, datetime.now())
                 status_history_id = sh_row['id']
                 
-                # 12. create client campaign model
+                # 12. create client campaign model with selected_transfer_setting_id
                 ccm_insert_query = """
                     INSERT INTO client_campaign_model
-                    (client_id, campaign_model_id, status_history_id, start_date, end_date,
-                     is_custom, custom_comments, current_remote_agents, is_active, is_enabled,
-                     is_approved, dialer_settings_id, bot_count, long_call_scripts_active,
-                     disposition_set)
-                    VALUES ($1, $2, $3, $4, NULL, false, '', $5, false, true, false, $6, $7, false, false)
+                    (client_id, campaign_model_id, selected_transfer_setting_id, status_history_id, 
+                     start_date, end_date, is_custom, custom_comments, current_remote_agents, 
+                     is_active, is_enabled, is_approved, dialer_settings_id, bot_count, 
+                     long_call_scripts_active, disposition_set)
+                    VALUES ($1, $2, $3, $4, $5, NULL, false, '', $6, false, true, false, $7, $8, false, false)
                     RETURNING id
                 """
                 ccm_row = await conn.fetchrow(
                     ccm_insert_query,
                     user_id,
                     campaign_model_id,
+                    request.transfer_settings_id,
                     status_history_id,
                     datetime.now(),
                     request.custom_requirements or '',
@@ -516,20 +517,21 @@ async def add_campaign_to_client(
                 sh_row = await conn.fetchrow(sh_query, status_id, datetime.now())
                 status_history_id = sh_row['id']
                 
-                # create client campaign model
+                # create client campaign model with selected_transfer_setting_id
                 ccm_insert_query = """
                     INSERT INTO client_campaign_model
-                    (client_id, campaign_model_id, status_history_id, start_date, end_date,
-                     is_custom, custom_comments, current_remote_agents, is_active, is_enabled,
-                     is_approved, dialer_settings_id, bot_count, long_call_scripts_active,
-                     disposition_set)
-                    VALUES ($1, $2, $3, $4, NULL, false, '', $5, false, true, false, $6, $7, false, false)
+                    (client_id, campaign_model_id, selected_transfer_setting_id, status_history_id, 
+                     start_date, end_date, is_custom, custom_comments, current_remote_agents, 
+                     is_active, is_enabled, is_approved, dialer_settings_id, bot_count, 
+                     long_call_scripts_active, disposition_set)
+                    VALUES ($1, $2, $3, $4, $5, NULL, false, '', $6, false, true, false, $7, $8, false, false)
                     RETURNING id
                 """
                 ccm_row = await conn.fetchrow(
                     ccm_insert_query,
                     user_id,
                     campaign_model_id,
+                    request.transfer_settings_id,
                     status_history_id,
                     datetime.now(),
                     request.custom_requirements or '',

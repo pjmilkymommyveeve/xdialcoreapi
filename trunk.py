@@ -5,7 +5,7 @@ from core.settings import settings
 from database.db import init_db_pool, close_db_pool
 
 # import routers
-from api import auth, campaigns, export, integration, recordings, stats, client
+from api import auth, campaigns, export, integration, recordings, stats, client, client_employees
 
 
 @asynccontextmanager
@@ -37,6 +37,7 @@ app.add_middleware(
 
 # include routers
 app.include_router(auth.router, prefix=settings.app.api_prefix)
+app.include_router(client_employees.router, prefix=settings.app.api_prefix)
 app.include_router(client.router, prefix=settings.app.api_prefix)
 app.include_router(campaigns.router, prefix=settings.app.api_prefix)
 app.include_router(recordings.router, prefix=settings.app.api_prefix)
