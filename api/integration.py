@@ -39,7 +39,7 @@ class IntegrationRequest(BaseModel):
     primary_user: str
     primary_password: str
     primary_bots_campaign: str
-    primary_user_series: str
+    primary_user_series: Optional[str] = None
     primary_port: int = 5060
     closer_ip_validation: Optional[str] = None
     closer_admin_link: Optional[str] = None
@@ -59,7 +59,7 @@ class IntegrationResponse(BaseModel):
 
 @router.get("/form", response_model=IntegrationFormResponse)
 async def get_transfer_settings_and_models():
-    """GET TRANSFER SETTINGS - Get transfer settings and models (including the avilable transfer settings for each)"""
+    """GET TRANSFER SETTINGS - Get transfer settings and models (including the available transfer settings for each)"""
     pool = await get_db()
     
     async with pool.acquire() as conn:
@@ -119,6 +119,7 @@ async def get_transfer_settings_and_models():
             transfer_settings=transfer_settings
         )
 
+
 @router.post("/request", response_model=IntegrationResponse)
 async def submit_integration_request(request: IntegrationRequest):
     """POST INTEGRATION REQUEST - Create new client and campaign setup"""
@@ -172,7 +173,7 @@ async def submit_integration_request(request: IntegrationRequest):
                 # hash default password
                 hashed_password = hash_password('clientdefault123')
                 
-                # insert user
+                # insert user with is_superuser field
                 user_insert_query = """
                     INSERT INTO users (username, password, role_id, is_active, is_staff, is_superuser)
                     VALUES ($1, $2, $3, true, false, false)
@@ -186,10 +187,10 @@ async def submit_integration_request(request: IntegrationRequest):
                 )
                 user_id = user_row['id']
                 
-                # 3. create client profile
+                # 3. create client profile (removed is_archived column)
                 client_insert_query = """
-                    INSERT INTO clients (client_id, name, is_archived)
-                    VALUES ($1, $2, false)
+                    INSERT INTO clients (client_id, name, assembly_api_key)
+                    VALUES ($1, $2, '')
                 """
                 await conn.execute(client_insert_query, user_id, company_name)
                 
@@ -294,7 +295,7 @@ async def submit_integration_request(request: IntegrationRequest):
                     request.primary_user,
                     request.primary_password,
                     request.primary_bots_campaign,
-                    request.primary_user_series,
+                    request.primary_user_series or '',
                     request.primary_port,
                     dialer_settings_id
                 )
@@ -316,23 +317,14 @@ async def submit_integration_request(request: IntegrationRequest):
                     status_row = await conn.fetchrow(status_insert_query)
                     status_id = status_row['id']
                 
-                # 11. create status history
-                status_history_query = """
-                    INSERT INTO status_history (status_id, start_date, end_date)
-                    VALUES ($1, $2, NULL)
-                    RETURNING id
-                """
-                sh_row = await conn.fetchrow(status_history_query, status_id, datetime.now())
-                status_history_id = sh_row['id']
-                
-                # 12. create client campaign model with selected_transfer_setting_id
+                # 11. create client campaign model (removed status_history_id and non-existent fields)
                 ccm_insert_query = """
                     INSERT INTO client_campaign_model
-                    (client_id, campaign_model_id, selected_transfer_setting_id, status_history_id, 
+                    (client_id, campaign_model_id, selected_transfer_setting_id, 
                      start_date, end_date, is_custom, custom_comments, current_remote_agents, 
-                     is_active, is_enabled, is_approved, dialer_settings_id, bot_count, 
+                     is_active, dialer_settings_id, bot_count, 
                      long_call_scripts_active, disposition_set)
-                    VALUES ($1, $2, $3, $4, $5, NULL, false, '', $6, false, true, false, $7, $8, false, false)
+                    VALUES ($1, $2, $3, $4, NULL, false, $5, '', false, $6, $7, false, false)
                     RETURNING id
                 """
                 ccm_row = await conn.fetchrow(
@@ -340,13 +332,19 @@ async def submit_integration_request(request: IntegrationRequest):
                     user_id,
                     campaign_model_id,
                     request.transfer_settings_id,
-                    status_history_id,
                     datetime.now(),
                     request.custom_requirements or '',
                     dialer_settings_id,
                     request.number_of_bots
                 )
                 ccm_id = ccm_row['id']
+                
+                # 12. create status history linked to client_campaign
+                status_history_query = """
+                    INSERT INTO status_history (status_id, client_campaign_id, start_date, end_date)
+                    VALUES ($1, $2, $3, NULL)
+                """
+                await conn.execute(status_history_query, status_id, ccm_id, datetime.now())
                 
                 return IntegrationResponse(
                     success=True,
@@ -372,7 +370,7 @@ async def submit_integration_request(request: IntegrationRequest):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"An error occurred: {str(e)}"
             )
-        
+
 
 @router.post("/add-campaign", response_model=IntegrationResponse)
 async def add_campaign_to_client(
@@ -487,7 +485,7 @@ async def add_campaign_to_client(
                     request.primary_user,
                     request.primary_password,
                     request.primary_bots_campaign,
-                    request.primary_user_series,
+                    request.primary_user_series or '',
                     request.primary_port,
                     dialer_settings_id
                 )
@@ -507,23 +505,14 @@ async def add_campaign_to_client(
                     status_row = await conn.fetchrow(status_insert_query)
                     status_id = status_row['id']
                 
-                # create status history
-                sh_query = """
-                    INSERT INTO status_history (status_id, start_date, end_date)
-                    VALUES ($1, $2, NULL)
-                    RETURNING id
-                """
-                sh_row = await conn.fetchrow(sh_query, status_id, datetime.now())
-                status_history_id = sh_row['id']
-                
-                # create client campaign model with selected_transfer_setting_id
+                # create client campaign model (removed status_history_id and non-existent fields)
                 ccm_insert_query = """
                     INSERT INTO client_campaign_model
-                    (client_id, campaign_model_id, selected_transfer_setting_id, status_history_id, 
+                    (client_id, campaign_model_id, selected_transfer_setting_id, 
                      start_date, end_date, is_custom, custom_comments, current_remote_agents, 
-                     is_active, is_enabled, is_approved, dialer_settings_id, bot_count, 
+                     is_active, dialer_settings_id, bot_count, 
                      long_call_scripts_active, disposition_set)
-                    VALUES ($1, $2, $3, $4, $5, NULL, false, '', $6, false, true, false, $7, $8, false, false)
+                    VALUES ($1, $2, $3, $4, NULL, false, $5, '', false, $6, $7, false, false)
                     RETURNING id
                 """
                 ccm_row = await conn.fetchrow(
@@ -531,13 +520,19 @@ async def add_campaign_to_client(
                     user_id,
                     campaign_model_id,
                     request.transfer_settings_id,
-                    status_history_id,
                     datetime.now(),
                     request.custom_requirements or '',
                     dialer_settings_id,
                     request.number_of_bots
                 )
                 ccm_id = ccm_row['id']
+                
+                # create status history linked to client_campaign
+                sh_query = """
+                    INSERT INTO status_history (status_id, client_campaign_id, start_date, end_date)
+                    VALUES ($1, $2, $3, NULL)
+                """
+                await conn.execute(sh_query, status_id, ccm_id, datetime.now())
                 
                 return IntegrationResponse(
                     success=True,
