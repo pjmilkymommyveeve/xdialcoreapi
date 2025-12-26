@@ -119,7 +119,6 @@ async def get_transfer_settings_and_models():
             transfer_settings=transfer_settings
         )
 
-
 @router.post("/request", response_model=IntegrationResponse)
 async def submit_integration_request(request: IntegrationRequest):
     """POST INTEGRATION REQUEST - Create new client and campaign setup"""
@@ -175,8 +174,8 @@ async def submit_integration_request(request: IntegrationRequest):
                 
                 # insert user
                 user_insert_query = """
-                    INSERT INTO users (username, password, role_id, is_active, is_staff)
-                    VALUES ($1, $2, $3, true, false)
+                    INSERT INTO users (username, password, role_id, is_active, is_staff, is_superuser)
+                    VALUES ($1, $2, $3, true, false, false)
                     RETURNING id
                 """
                 user_row = await conn.fetchrow(
@@ -373,7 +372,7 @@ async def submit_integration_request(request: IntegrationRequest):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"An error occurred: {str(e)}"
             )
-
+        
 
 @router.post("/add-campaign", response_model=IntegrationResponse)
 async def add_campaign_to_client(
