@@ -60,7 +60,6 @@ class OverallVoiceStatsResponse(BaseModel):
     voice_stats: List[VoiceOverallStats]
 
 
-
 class CallStageData(BaseModel):
     stage: int
     transcription: Optional[str]
@@ -88,7 +87,7 @@ class CallLookupResponse(BaseModel):
     numbers_not_found: int
     results: List[CallLookupResult]
     not_found_numbers: List[str]
-
+    filters_applied: Dict[str, Optional[str]]
 
 
 # ============== HELPER FUNCTIONS ==============
@@ -138,17 +137,12 @@ async def build_date_filter(start_date: str, end_date: str, start_time: str, end
 def parse_csv_numbers(content: bytes) -> List[str]:
     """Parse CSV file and extract numbers"""
     try:
-        # Decode content
         text = content.decode('utf-8')
-        
-        # Parse CSV
         reader = csv.reader(io.StringIO(text))
         numbers = []
         
         for row in reader:
-            # Handle each cell in the row
             for cell in row:
-                # Clean and split by comma if needed
                 cell_numbers = [n.strip() for n in cell.split(',') if n.strip()]
                 numbers.extend(cell_numbers)
         
@@ -168,13 +162,58 @@ def parse_csv_numbers(content: bytes) -> List[str]:
         )
 
 
-async def fetch_call_data(numbers: List[str], conn) -> tuple[List[CallLookupResult], List[str]]:
-    """Fetch call data for given numbers"""
+async def fetch_call_data(
+    numbers: List[str], 
+    conn, 
+    client_id: Optional[int] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+) -> tuple[List[CallLookupResult], List[str]]:
+    """Fetch call data for given numbers with optional filters"""
     if not numbers:
         return [], []
     
+    # Build WHERE clause
+    where_clauses = ["c.number = ANY($1)"]
+    params = [numbers]
+    param_count = 1
+    
+    # Add client filter
+    if client_id:
+        param_count += 1
+        where_clauses.append(f"ccm.client_id = ${param_count}")
+        params.append(client_id)
+    
+    # Add date filters
+    if start_date:
+        try:
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+            param_count += 1
+            where_clauses.append(f"c.timestamp >= ${param_count}")
+            params.append(start_dt)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid start_date format. Use YYYY-MM-DD"
+            )
+    
+    if end_date:
+        try:
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+            end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
+            param_count += 1
+            where_clauses.append(f"c.timestamp <= ${param_count}")
+            params.append(end_dt)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid end_date format. Use YYYY-MM-DD"
+            )
+    
+    where_clause = " AND ".join(where_clauses)
+    
     # Query to get all call stages for the given numbers
-    query = """
+    query = f"""
         SELECT 
             c.number,
             c.stage,
@@ -195,11 +234,11 @@ async def fetch_call_data(numbers: List[str], conn) -> tuple[List[CallLookupResu
         JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
         JOIN campaigns ca ON cm.campaign_id = ca.id
         JOIN models m ON cm.model_id = m.id
-        WHERE c.number = ANY($1)
+        WHERE {where_clause}
         ORDER BY c.number, c.stage
     """
     
-    rows = await conn.fetch(query, numbers)
+    rows = await conn.fetch(query, *params)
     
     # Group by number
     calls_by_number = {}
@@ -253,10 +292,22 @@ async def fetch_call_data(numbers: List[str], conn) -> tuple[List[CallLookupResu
     
     return results, not_found
 
-def generate_csv_output(results: List[CallLookupResult], not_found: List[str]) -> str:
+
+def generate_csv_output(
+    results: List[CallLookupResult], 
+    not_found: List[str],
+    filters: Dict[str, Optional[str]]
+) -> str:
     """Generate CSV output from call lookup results"""
     output = io.StringIO()
     writer = csv.writer(output)
+    
+    # Write filter information
+    writer.writerow(['Applied Filters:'])
+    writer.writerow(['Client ID', filters.get('client_id', 'All')])
+    writer.writerow(['Start Date', filters.get('start_date', 'All')])
+    writer.writerow(['End Date', filters.get('end_date', 'All')])
+    writer.writerow([])  # Empty row
     
     # Write header
     writer.writerow([
@@ -617,10 +668,14 @@ async def get_overall_voice_stats(
             overall_transfer_rate=calculate_transfer_rate(total_transferred, total_calls),
             voice_stats=voice_stats
         )
-    
+
+
 @router.post("/lookup-calls-json", response_model=CallLookupResponse)
 async def lookup_calls_json(
     file: UploadFile = File(..., description="CSV file containing phone numbers"),
+    client_id: Optional[int] = Query(None, description="Filter by specific client"),
+    start_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="End date YYYY-MM-DD"),
     user_info: Dict = Depends(require_roles(["admin", "onboarding"]))
 ):
     """
@@ -633,6 +688,11 @@ async def lookup_calls_json(
     - Voice used at each stage
     - Transfer status at each stage
     - Final response category and decision
+    
+    Optional Filters:
+    - client_id: Filter calls by specific client
+    - start_date: Filter calls from this date onwards (YYYY-MM-DD)
+    - end_date: Filter calls up to this date (YYYY-MM-DD)
     
     Response format: JSON
     """
@@ -653,23 +713,39 @@ async def lookup_calls_json(
             detail="No valid phone numbers found in CSV file"
         )
     
-    # Fetch call data
+    # Fetch call data with filters
     pool = await get_db()
     async with pool.acquire() as conn:
-        results, not_found = await fetch_call_data(numbers, conn)
+        results, not_found = await fetch_call_data(
+            numbers, 
+            conn, 
+            client_id=client_id,
+            start_date=start_date,
+            end_date=end_date
+        )
+    
+    filters_applied = {
+        "client_id": str(client_id) if client_id else None,
+        "start_date": start_date,
+        "end_date": end_date
+    }
     
     return CallLookupResponse(
         total_numbers_searched=len(numbers),
         numbers_found=len(results),
         numbers_not_found=len(not_found),
         results=results,
-        not_found_numbers=not_found
+        not_found_numbers=not_found,
+        filters_applied=filters_applied
     )
 
 
 @router.post("/lookup-calls-csv")
 async def lookup_calls_csv(
     file: UploadFile = File(..., description="CSV file containing phone numbers"),
+    client_id: Optional[int] = Query(None, description="Filter by specific client"),
+    start_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="End date YYYY-MM-DD"),
     user_info: Dict = Depends(require_roles(["admin", "onboarding"]))
 ):
     """
@@ -682,6 +758,11 @@ async def lookup_calls_csv(
     - Voice used at each stage
     - Transfer status at each stage
     - Final response category and decision
+    
+    Optional Filters:
+    - client_id: Filter calls by specific client
+    - start_date: Filter calls from this date onwards (YYYY-MM-DD)
+    - end_date: Filter calls up to this date (YYYY-MM-DD)
     
     Response format: CSV file download
     """
@@ -702,21 +783,43 @@ async def lookup_calls_csv(
             detail="No valid phone numbers found in CSV file"
         )
     
-    # Fetch call data
+    # Fetch call data with filters
     pool = await get_db()
     async with pool.acquire() as conn:
-        results, not_found = await fetch_call_data(numbers, conn)
+        results, not_found = await fetch_call_data(
+            numbers, 
+            conn, 
+            client_id=client_id,
+            start_date=start_date,
+            end_date=end_date
+        )
     
-    # Generate CSV output
-    csv_content = generate_csv_output(results, not_found)
+    # Generate CSV output with filter information
+    filters = {
+        "client_id": str(client_id) if client_id else None,
+        "start_date": start_date or None,
+        "end_date": end_date or None
+    }
+    csv_content = generate_csv_output(results, not_found, filters)
     
     # Create streaming response
     output = io.BytesIO(csv_content.encode('utf-8'))
+    
+    # Build filename with filter information
+    filename_parts = ['call_lookup_results']
+    if client_id:
+        filename_parts.append(f'client_{client_id}')
+    if start_date:
+        filename_parts.append(f'from_{start_date}')
+    if end_date:
+        filename_parts.append(f'to_{end_date}')
+    filename_parts.append(datetime.now().strftime('%Y%m%d_%H%M%S'))
+    filename = '_'.join(filename_parts) + '.csv'
     
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",
         headers={
-            "Content-Disposition": f"attachment; filename=call_lookup_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            "Content-Disposition": f"attachment; filename={filename}"
         }
     )
