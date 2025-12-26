@@ -491,7 +491,7 @@ async def add_campaign_to_client(
                 )
                 
                 # get or create status
-                status_query = "SELECT id FROM status WHERE status_name = 'Pending Approval'"
+                status_query = "SELECT id FROM status WHERE status_name = 'Not Approved'"
                 status_row = await conn.fetchrow(status_query)
                 
                 if status_row:
