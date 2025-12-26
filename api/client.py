@@ -90,6 +90,11 @@ class EmployerInfoResponse(BaseModel):
     user_id: int
     username: str
 
+class UserInfo(BaseModel):
+    user_id: int
+    roles: List[str]
+
+
 
 # ============== HELPER FUNCTIONS ==============
 
@@ -327,13 +332,13 @@ async def get_client_campaigns(
 
 @router.get("/employer", response_model=EmployerInfoResponse)
 async def get_client_member_employer(
-    user_info: Dict = Depends(require_roles(['client_member']))
+    user_info: UserInfo = Depends(require_roles(['client_member']))
 ):
     """
     Get employer client information for the authenticated employee user.
     Only accessible by client_member role.
     """
-    user_id = user_info['user_id']
+    user_id = user_info.user_id  # Now with proper type hints!
     
     pool = await get_db()
     
@@ -363,8 +368,6 @@ async def get_client_member_employer(
             user_id=user_id,
             username=employer_data['username']
         )
-    
-
 
 @router.get("/with-campaigns", response_model=AllClientsResponse)
 async def get_all_clients_with_campaigns(
