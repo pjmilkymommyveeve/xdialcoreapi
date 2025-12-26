@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from pydantic import BaseModel
 from typing import List, Optional, Dict
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 from core.dependencies import require_roles
 from database.db import get_db
 
@@ -144,6 +144,45 @@ class AdminCampaignDashboardResponse(BaseModel):
 
 # ============== HELPER FUNCTIONS ==============
 
+def group_calls_by_session(calls: List[dict], duration_minutes: int = 2) -> List[List[dict]]:
+    """
+    Group calls by number and timestamp proximity.
+    Calls with the same number within duration_minutes are considered part of the same session.
+    """
+    if not calls:
+        return []
+    
+    # Sort by number and timestamp
+    sorted_calls = sorted(calls, key=lambda x: (x['number'], x['timestamp']))
+    
+    sessions = []
+    current_session = []
+    
+    for call in sorted_calls:
+        if not current_session:
+            current_session.append(call)
+        else:
+            last_call = current_session[-1]
+            
+            # Check if same number and within duration window
+            same_number = call['number'] == last_call['number']
+            time_diff = call['timestamp'] - last_call['timestamp']
+            within_window = time_diff <= timedelta(minutes=duration_minutes)
+            
+            if same_number and within_window:
+                current_session.append(call)
+            else:
+                # Start new session
+                sessions.append(current_session)
+                current_session = [call]
+    
+    # Add last session
+    if current_session:
+        sessions.append(current_session)
+    
+    return sessions
+
+
 async def get_user_client_id(conn, user_id: int, roles: List[str]) -> Optional[int]:
     """
     Get the client_id that the user has access to.
@@ -220,7 +259,7 @@ async def get_client_campaign(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(50, ge=1, le=500, description="Records per page")
 ):
-    """Get client campaign dashboard with call records (latest stage only)."""
+    """Get client campaign dashboard with call records (latest stage of each call session)."""
     # Privileged roles that can see any campaign with any status
     PRIVILEGED_ROLES = ['admin', 'onboarding', 'qa']
     
@@ -243,16 +282,6 @@ async def get_client_campaign(
             today = date.today()
             start_date = today.strftime('%Y-%m-%d')
             end_date = today.strftime('%Y-%m-%d')
-        
-        # Get latest stage for each number
-        latest_stages_query = """
-            SELECT number, MAX(stage) as max_stage
-            FROM calls
-            WHERE client_campaign_model_id = $1
-            GROUP BY number
-        """
-        latest_stages_rows = await conn.fetch(latest_stages_query, campaign_id)
-        latest_stages = {row['number']: row['max_stage'] for row in latest_stages_rows}
         
         # Build query with filters
         where_clauses = ["c.client_campaign_model_id = $1"]
@@ -322,29 +351,39 @@ async def get_client_campaign(
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             LEFT JOIN voices v ON c.voice_id = v.id
             WHERE {' AND '.join(where_clauses)}
-            ORDER BY c.timestamp DESC
+            ORDER BY c.number, c.timestamp, c.stage
         """
         all_calls = await conn.fetch(calls_query, *params)
         
-        # Filter to latest stage only
-        filtered_calls = []
-        for call in all_calls:
-            if call['number'] in latest_stages and call['stage'] == latest_stages[call['number']]:
-                filtered_calls.append(call)
+        # Convert to list of dicts for grouping
+        calls_list = [dict(call) for call in all_calls]
+        
+        # Group calls into sessions (2-minute window)
+        call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
+        
+        # Get latest stage from each session
+        latest_calls = []
+        for session in call_sessions:
+            # Sort by stage to get the latest
+            session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
+            latest_calls.append(session_sorted[-1])
+        
+        # Sort by timestamp descending for display
+        latest_calls.sort(key=lambda x: x['timestamp'], reverse=True)
         
         # Pagination
-        total_calls = len(filtered_calls)
+        total_calls = len(latest_calls)
         total_pages = (total_calls + page_size - 1) // page_size if total_calls > 0 else 1
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
-        paginated_calls = filtered_calls[start_idx:end_idx]
+        paginated_calls = latest_calls[start_idx:end_idx]
         
         # Get categories with counts
         all_categories_query = "SELECT id, name, color FROM response_categories ORDER BY name"
         db_categories = await conn.fetch(all_categories_query)
         
         category_counts_raw = {}
-        for call in filtered_calls:
+        for call in latest_calls:
             if call['category_name']:
                 cat_name = call['category_name']
                 if cat_name not in category_counts_raw:
@@ -446,7 +485,7 @@ async def get_admin_campaign_dashboard(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(50, ge=1, le=500, description="Records per page")
 ):
-    """Get admin campaign dashboard with detailed call records including all stages."""
+    """Get admin campaign dashboard with detailed call records including all stages (grouped by 2-minute sessions)."""
     pool = await get_db()
     
     async with pool.acquire() as conn:
@@ -548,32 +587,30 @@ async def get_admin_campaign_dashboard(
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             LEFT JOIN voices v ON c.voice_id = v.id
             WHERE {' AND '.join(where_clauses)}
-            ORDER BY c.number, c.stage
+            ORDER BY c.number, c.timestamp, c.stage
         """
         all_calls = await conn.fetch(calls_query, *params)
         
-        # Group by number
-        calls_by_number = {}
-        for call in all_calls:
-            number = call['number']
-            if number not in calls_by_number:
-                calls_by_number[number] = []
-            calls_by_number[number].append(call)
+        # Convert to list of dicts for grouping
+        calls_list = [dict(call) for call in all_calls]
         
-        # Pagination
-        total_calls = len(calls_by_number)
+        # Group calls into sessions (2-minute window)
+        call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
+        
+        # Pagination on sessions
+        total_calls = len(call_sessions)
         total_pages = (total_calls + page_size - 1) // page_size if total_calls > 0 else 1
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
-        paginated_numbers = list(calls_by_number.items())[start_idx:end_idx]
+        paginated_sessions = call_sessions[start_idx:end_idx]
         
-        # Get categories
+        # Get categories (from latest call in each session)
         all_categories_query = "SELECT id, name, color FROM response_categories ORDER BY name"
         db_categories = await conn.fetch(all_categories_query)
         
         category_counts_raw = {}
-        for number, stages in calls_by_number.items():
-            latest_call = stages[-1]
+        for session in call_sessions:
+            latest_call = sorted(session, key=lambda x: x['stage'] or 0)[-1]
             if latest_call['category_name']:
                 cat_name = latest_call['category_name']
                 if cat_name not in category_counts_raw:
@@ -613,15 +650,17 @@ async def get_admin_campaign_dashboard(
         
         # Format detailed calls
         calls_data = []
-        for number, stages in paginated_numbers:
-            latest_call = stages[-1]
-            first_call = stages[0]
+        for session in paginated_sessions:
+            # Sort stages by stage number
+            stages_sorted = sorted(session, key=lambda x: x['stage'] or 0)
+            latest_call = stages_sorted[-1]
+            first_call = stages_sorted[0]
             
             original_category = latest_call['category_name'] or 'Unknown'
             combined_category = ADMIN_CATEGORY_MAPPING.get(original_category, original_category)
             
             stage_details = []
-            for stage_call in stages:
+            for stage_call in stages_sorted:
                 stage_category = stage_call['category_name'] or 'Unknown'
                 stage_combined = ADMIN_CATEGORY_MAPPING.get(stage_category, stage_category)
                 
@@ -636,15 +675,15 @@ async def get_admin_campaign_dashboard(
             
             calls_data.append(DetailedCallRecord(
                 id=latest_call['id'],
-                number=number,
+                number=latest_call['number'],
                 list_id=latest_call['list_id'] or 'N/A',
                 latest_category=combined_category.capitalize(),
                 latest_category_color=latest_call['category_color'] or '#6B7280',
                 latest_stage=latest_call['stage'] or 0,
                 first_timestamp=first_call['timestamp'].strftime('%m/%d/%Y, %H:%M:%S'),
                 last_timestamp=latest_call['timestamp'].strftime('%m/%d/%Y, %H:%M:%S'),
-                total_stages=len(stages),
-                has_transcription=any(s['transcription'] for s in stages),
+                total_stages=len(stages_sorted),
+                has_transcription=any(s['transcription'] for s in stages_sorted),
                 transferred=latest_call['transferred'] or False,
                 stages=stage_details
             ))
