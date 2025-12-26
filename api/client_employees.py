@@ -212,10 +212,10 @@ async def create_client_employee(
         hashed_password = hash_password(employee.password)
         
         async with conn.transaction():
-            # Create user account
+            # Create user account with is_superuser field
             create_user_query = """
-                INSERT INTO users (username, password, role_id, is_active, is_staff)
-                VALUES ($1, $2, $3, $4, $5)
+                INSERT INTO users (username, password, role_id, is_active, is_staff, is_superuser)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 RETURNING id, username, is_active
             """
             new_user = await conn.fetchrow(
@@ -223,8 +223,9 @@ async def create_client_employee(
                 employee.username,
                 hashed_password,
                 role_id,
-                True,
-                False
+                True,      # is_active
+                False,     # is_staff
+                False      # is_superuser 
             )
             
             # Create client-employee association
@@ -245,7 +246,6 @@ async def create_client_employee(
                 username=new_user['username'],
                 is_active=new_user['is_active']
             )
-
 
 @router.patch("/{client_id}/employees/{employee_id}/password")
 async def update_employee_password(
