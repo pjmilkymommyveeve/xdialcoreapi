@@ -125,6 +125,133 @@ async def get_user_client_id(conn, user_id: int, roles: List[str]) -> Optional[i
 
 # ============== ENDPOINTS ==============
 
+
+
+@router.get("/employer", response_model=EmployerInfoResponse)
+async def get_client_member_employer(
+    user_info: Dict[str, Any] = Depends(require_roles(['client_member']))
+):
+    """
+    Get employer client information for the authenticated employee user.
+    Only accessible by client_member role.
+    """
+    user_id = user_info['user_id']
+    
+    pool = await get_db()
+    
+    async with pool.acquire() as conn:
+        # Get employer information
+        employer_query = """
+            SELECT 
+                ce.client_id,
+                c.name as client_name,
+                u.username
+            FROM client_employees ce
+            JOIN clients c ON ce.client_id = c.client_id
+            JOIN users u ON ce.user_id = u.id
+            WHERE ce.user_id = $1
+        """
+        employer_data = await conn.fetchrow(employer_query, user_id)
+        
+        if not employer_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No employer association found"
+            )
+        
+        return EmployerInfoResponse(
+            client_id=employer_data['client_id'],
+            client_name=employer_data['client_name'],
+            user_id=user_id,
+            username=employer_data['username']
+        )
+
+@router.get("/with-campaigns", response_model=AllClientsResponse)
+async def get_all_clients_with_campaigns(
+    user_info: Dict = Depends(require_roles(["admin", "onboarding", "qa"]))
+):
+    """
+    ADMIN/ONBOARDING/QA: GET ALL CLIENTS WITH THEIR CAMPAIGNS
+    
+    Returns all clients with their basic information and associated campaigns.
+    Only includes campaigns that are not Archived.
+    """
+    pool = await get_db()
+    
+    async with pool.acquire() as conn:
+        # Get all clients
+        clients_query = """
+            SELECT client_id, name
+            FROM clients
+            ORDER BY name
+        """
+        clients = await conn.fetch(clients_query)
+        
+        if not clients:
+            return AllClientsResponse(
+                total_clients=0,
+                clients=[]
+            )
+        
+        # Get all campaigns for all clients (excluding archived)
+        campaigns_query = """
+            SELECT 
+                ccm.id,
+                ccm.client_id,
+                ca.name as campaign_name,
+                m.name as model_name,
+                ccm.is_active
+            FROM client_campaign_model ccm
+            JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
+            JOIN campaigns ca ON cm.campaign_id = ca.id
+            JOIN models m ON cm.model_id = m.id
+            WHERE EXISTS (
+                SELECT 1 FROM status_history sh
+                JOIN status s ON sh.status_id = s.id
+                WHERE sh.client_campaign_id = ccm.id
+                AND sh.end_date IS NULL
+                AND s.status_name != 'Archived'
+            ) OR NOT EXISTS (
+                SELECT 1 FROM status_history sh
+                WHERE sh.client_campaign_id = ccm.id
+            )
+            ORDER BY ca.name, m.name
+        """
+        campaigns = await conn.fetch(campaigns_query)
+        
+        # Group campaigns by client
+        campaigns_by_client = {}
+        for campaign in campaigns:
+            client_id = campaign['client_id']
+            if client_id not in campaigns_by_client:
+                campaigns_by_client[client_id] = []
+            
+            campaigns_by_client[client_id].append(CampaignBasicInfo(
+                id=campaign['id'],
+                campaign_name=campaign['campaign_name'],
+                model_name=campaign['model_name'],
+                is_active=campaign['is_active']
+            ))
+        
+        # Build response
+        clients_list = []
+        for client in clients:
+            client_id = client['client_id']
+            client_campaigns = campaigns_by_client.get(client_id, [])
+            
+            clients_list.append(ClientWithCampaignsResponse(
+                client_id=client_id,
+                client_name=client['name'],
+                campaigns=client_campaigns,
+                total_campaigns=len(client_campaigns)
+            ))
+        
+        return AllClientsResponse(
+            total_clients=len(clients_list),
+            clients=clients_list
+        )
+
+
 @router.get("/{client_id}", response_model=ClientCampaignsListResponse)
 async def get_client_campaigns(
     client_id: int,
@@ -327,129 +454,4 @@ async def get_client_campaigns(
             total_campaigns=total_campaigns,
             active_campaigns=active_count,
             inactive_campaigns=inactive_count
-        )
-
-
-@router.get("/employer", response_model=EmployerInfoResponse)
-async def get_client_member_employer(
-    user_info: Dict[str, Any] = Depends(require_roles(['client_member']))
-):
-    """
-    Get employer client information for the authenticated employee user.
-    Only accessible by client_member role.
-    """
-    user_id = user_info['user_id']
-    
-    pool = await get_db()
-    
-    async with pool.acquire() as conn:
-        # Get employer information
-        employer_query = """
-            SELECT 
-                ce.client_id,
-                c.name as client_name,
-                u.username
-            FROM client_employees ce
-            JOIN clients c ON ce.client_id = c.client_id
-            JOIN users u ON ce.user_id = u.id
-            WHERE ce.user_id = $1
-        """
-        employer_data = await conn.fetchrow(employer_query, user_id)
-        
-        if not employer_data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="No employer association found"
-            )
-        
-        return EmployerInfoResponse(
-            client_id=employer_data['client_id'],
-            client_name=employer_data['client_name'],
-            user_id=user_id,
-            username=employer_data['username']
-        )
-
-@router.get("/with-campaigns", response_model=AllClientsResponse)
-async def get_all_clients_with_campaigns(
-    user_info: Dict = Depends(require_roles(["admin", "onboarding", "qa"]))
-):
-    """
-    ADMIN/ONBOARDING/QA: GET ALL CLIENTS WITH THEIR CAMPAIGNS
-    
-    Returns all clients with their basic information and associated campaigns.
-    Only includes campaigns that are not Archived.
-    """
-    pool = await get_db()
-    
-    async with pool.acquire() as conn:
-        # Get all clients
-        clients_query = """
-            SELECT client_id, name
-            FROM clients
-            ORDER BY name
-        """
-        clients = await conn.fetch(clients_query)
-        
-        if not clients:
-            return AllClientsResponse(
-                total_clients=0,
-                clients=[]
-            )
-        
-        # Get all campaigns for all clients (excluding archived)
-        campaigns_query = """
-            SELECT 
-                ccm.id,
-                ccm.client_id,
-                ca.name as campaign_name,
-                m.name as model_name,
-                ccm.is_active
-            FROM client_campaign_model ccm
-            JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
-            JOIN campaigns ca ON cm.campaign_id = ca.id
-            JOIN models m ON cm.model_id = m.id
-            WHERE EXISTS (
-                SELECT 1 FROM status_history sh
-                JOIN status s ON sh.status_id = s.id
-                WHERE sh.client_campaign_id = ccm.id
-                AND sh.end_date IS NULL
-                AND s.status_name != 'Archived'
-            ) OR NOT EXISTS (
-                SELECT 1 FROM status_history sh
-                WHERE sh.client_campaign_id = ccm.id
-            )
-            ORDER BY ca.name, m.name
-        """
-        campaigns = await conn.fetch(campaigns_query)
-        
-        # Group campaigns by client
-        campaigns_by_client = {}
-        for campaign in campaigns:
-            client_id = campaign['client_id']
-            if client_id not in campaigns_by_client:
-                campaigns_by_client[client_id] = []
-            
-            campaigns_by_client[client_id].append(CampaignBasicInfo(
-                id=campaign['id'],
-                campaign_name=campaign['campaign_name'],
-                model_name=campaign['model_name'],
-                is_active=campaign['is_active']
-            ))
-        
-        # Build response
-        clients_list = []
-        for client in clients:
-            client_id = client['client_id']
-            client_campaigns = campaigns_by_client.get(client_id, [])
-            
-            clients_list.append(ClientWithCampaignsResponse(
-                client_id=client_id,
-                client_name=client['name'],
-                campaigns=client_campaigns,
-                total_campaigns=len(client_campaigns)
-            ))
-        
-        return AllClientsResponse(
-            total_clients=len(clients_list),
-            clients=clients_list
         )
