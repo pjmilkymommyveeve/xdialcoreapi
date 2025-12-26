@@ -302,7 +302,7 @@ async def submit_integration_request(request: IntegrationRequest):
                 
                 # 10. get or create status
                 status_query = """
-                    SELECT id FROM status WHERE status_name = 'Pending Approval'
+                    SELECT id FROM status WHERE status_name = 'Not Approved'
                 """
                 status_row = await conn.fetchrow(status_query)
                 
@@ -311,7 +311,7 @@ async def submit_integration_request(request: IntegrationRequest):
                 else:
                     status_insert_query = """
                         INSERT INTO status (status_name)
-                        VALUES ('Pending Approval')
+                        VALUES ('Not Approved')
                         RETURNING id
                     """
                     status_row = await conn.fetchrow(status_insert_query)
@@ -499,7 +499,7 @@ async def add_campaign_to_client(
                 else:
                     status_insert_query = """
                         INSERT INTO status (status_name)
-                        VALUES ('Pending Approval')
+                        VALUES ('Not Approved')
                         RETURNING id
                     """
                     status_row = await conn.fetchrow(status_insert_query)
