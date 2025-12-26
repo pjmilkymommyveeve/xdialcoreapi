@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 from core.dependencies import require_roles
 from database.db import get_db
@@ -332,13 +332,13 @@ async def get_client_campaigns(
 
 @router.get("/employer", response_model=EmployerInfoResponse)
 async def get_client_member_employer(
-    user_info: UserInfo = Depends(require_roles(['client_member']))
+    user_info: Dict[str, Any] = Depends(require_roles(['client_member']))
 ):
     """
     Get employer client information for the authenticated employee user.
     Only accessible by client_member role.
     """
-    user_id = user_info.user_id  # Now with proper type hints!
+    user_id = user_info['user_id']
     
     pool = await get_db()
     
