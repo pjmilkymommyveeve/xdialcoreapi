@@ -84,6 +84,12 @@ class AllClientsResponse(BaseModel):
     total_clients: int
     clients: List[ClientWithCampaignsResponse]
 
+class EmployerInfoResponse(BaseModel):
+    client_id: int
+    client_name: str
+    user_id: int
+    username: str
+
 
 # ============== HELPER FUNCTIONS ==============
 
@@ -319,7 +325,7 @@ async def get_client_campaigns(
         )
 
 
-@router.get("/employer")
+@router.get("/employer", response_model=EmployerInfoResponse)
 async def get_client_member_employer(
     user_info: Dict = Depends(require_roles(['client_member']))
 ):
@@ -351,12 +357,12 @@ async def get_client_member_employer(
                 detail="No employer association found"
             )
         
-        return {
-            "client_id": employer_data['client_id'],
-            "client_name": employer_data['client_name'],
-            "user_id": user_id,
-            "username": employer_data['username']
-        }
+        return EmployerInfoResponse(
+            client_id=employer_data['client_id'],
+            client_name=employer_data['client_name'],
+            user_id=user_id,
+            username=employer_data['username']
+        )
     
 
 
