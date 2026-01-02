@@ -182,7 +182,7 @@ async def verify_campaign_access(conn, campaign_id: int, user_id: int, roles: Li
     
     # Check status based on roles
     is_privileged = any(role in PRIVILEGED_ROLES for role in roles)
-    allowed_statuses = ['Enabled', 'Disabled'] if is_privileged else ['Enabled', 'Disabled']
+    allowed_statuses = ['Enabled', 'Disabled', 'Testing'] if is_privileged else ['Enabled', 'Disabled', 'Testing']
     
     if campaign['current_status'] not in allowed_statuses:
         raise HTTPException(

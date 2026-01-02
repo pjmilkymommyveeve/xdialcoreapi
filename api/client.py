@@ -305,7 +305,7 @@ async def get_client_campaigns(
             status_filter = "AND (s.status_name != 'Archived' OR s.status_name IS NULL)"
         else:
             # Only show enabled campaigns
-            status_filter = "AND s.status_name = 'Enabled'"
+            status_filter = "AND s.status_name IN ('Enabled', 'Testing')"
         
         campaigns_query = f"""
             SELECT 

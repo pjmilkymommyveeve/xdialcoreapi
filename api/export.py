@@ -104,7 +104,7 @@ async def verify_export_access(conn, campaign_id: int, user_id: int, roles: List
         )
     
     # Only Enabled and Disabled campaigns can be exported
-    if campaign['current_status'] not in ['Enabled', 'Disabled']:
+    if campaign['current_status'] not in ['Enabled', 'Disabled', 'Testing']:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Campaign is not accessible for export"

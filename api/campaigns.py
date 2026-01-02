@@ -268,7 +268,7 @@ async def get_client_campaign(
     
     # Determine allowed statuses based on roles
     is_privileged = any(role in PRIVILEGED_ROLES for role in roles)
-    allowed_statuses = ['Enabled', 'Disabled'] if is_privileged else ['Enabled']
+    allowed_statuses = ['Enabled', 'Testing','Disabled'] if is_privileged else ['Enabled', 'Testing']
     
     pool = await get_db()
     
