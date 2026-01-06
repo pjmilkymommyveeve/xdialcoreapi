@@ -371,7 +371,6 @@ async def submit_integration_request(request: IntegrationRequest):
                 detail=f"An error occurred: {str(e)}"
             )
 
-
 @router.post("/add-campaign", response_model=IntegrationResponse)
 async def add_campaign_to_client(
     request: IntegrationRequest,
@@ -384,7 +383,7 @@ async def add_campaign_to_client(
         try:
             async with conn.transaction():
                 # verify client exists
-                client_query = "SELECT client_id FROM clients WHERE client_id = $1"
+                client_query = "SELECT client_id, name FROM clients WHERE client_id = $1"
                 client = await conn.fetchrow(client_query, user_id)
                 
                 if not client:
@@ -403,6 +402,15 @@ async def add_campaign_to_client(
                     )
                 campaign_id = campaign_row['id']
                 
+                # verify transfer settings exist
+                ts_query = "SELECT id FROM transfer_settings WHERE id = $1"
+                ts_row = await conn.fetchrow(ts_query, request.transfer_settings_id)
+                if not ts_row:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Transfer settings not found"
+                    )
+                
                 # get model with transfer settings
                 model_query = """
                     SELECT m.id
@@ -418,7 +426,7 @@ async def add_campaign_to_client(
                 if not model_row:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Model not found"
+                        detail="Model not found for selected transfer settings"
                     )
                 model_id = model_row['id']
                 
@@ -505,7 +513,7 @@ async def add_campaign_to_client(
                     status_row = await conn.fetchrow(status_insert_query)
                     status_id = status_row['id']
                 
-                # create client campaign model (removed status_history_id and non-existent fields)
+                # create client campaign model
                 ccm_insert_query = """
                     INSERT INTO client_campaign_model
                     (client_id, campaign_model_id, selected_transfer_setting_id, 
@@ -536,8 +544,9 @@ async def add_campaign_to_client(
                 
                 return IntegrationResponse(
                     success=True,
-                    message="Campaign request submitted successfully!",
+                    message="Campaign added successfully!",
                     data={
+                        "client_name": client['name'],
                         "campaign": request.campaign,
                         "model": request.model_name,
                         "bot_count": request.number_of_bots,
