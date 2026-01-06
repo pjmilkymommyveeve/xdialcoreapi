@@ -603,6 +603,8 @@ async def get_admin_campaign_dashboard(
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
         paginated_sessions = call_sessions[start_idx:end_idx]
+        paginated_sessions.sort(key=lambda session: max(call['timestamp'] for call in session), reverse=True)
+
         
         # Get categories (from latest call in each session)
         all_categories_query = "SELECT id, name, color FROM response_categories ORDER BY name"
