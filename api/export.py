@@ -346,25 +346,23 @@ async def download_export(
         output = StringIO()
         writer = csv.writer(output)
         writer.writerow([
-            'Call ID', 'Phone Number', 'List ID', 'Category', 'Timestamp',
-            'Transferred', 'Stage', 'Voice', 'Transcription'
-        ])
+        'Call ID', 'Phone Number', 'List ID', 'Category', 'Timestamp',
+        'Transferred', 'Stage'
+                ])
         
         for call in filtered_calls:
             original_category = call['category_name'] or 'Unknown'
             combined_category = CATEGORY_MAPPING.get(original_category, original_category)
             
             writer.writerow([
-                call['id'],
-                call['number'],
-                call['list_id'] or '',
-                combined_category.capitalize(),
-                call['timestamp'].strftime('%Y-%m-%d %H:%M:%S'),
-                'Yes' if call['transferred'] else 'No',
-                call['stage'] or 0,
-                call['voice_name'] or 'Unknown',
-                call['transcription'] or ''
-            ])
+            call['id'],
+            call['number'],
+            call['list_id'] or '',
+            combined_category.capitalize(),
+            call['timestamp'].strftime('%Y-%m-%d %H:%M:%S'),
+            'Yes' if call['transferred'] else 'No',
+            call['stage'] or 0
+                        ])
         
         # Prepare response
         output.seek(0)
