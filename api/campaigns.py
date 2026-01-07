@@ -12,21 +12,19 @@ router = APIRouter(prefix="/campaigns", tags=["Campaigns"])
 # ============== CATEGORY MAPPINGS ==============
 
 CLIENT_CATEGORY_MAPPING = {
-    "greetingresponse": "Greeting Response",
-    "notfeelinggood": "Not Feeling Good",
-    "dnc": "Do Not Call",
+    "notfeelinggood": "",
+    "dnc": "DNC",
     "honeypot_hardcoded": "Honeypot",
     "honeypot": "Honeypot",
     "spanishanswermachine": "Answering Machine",
     "answermachine": "Answering Machine",
     "already": "Not Interested",
-    "rebuttal": "Rebuttal",
     "notinterested": "Not Interested",
-    "busy": "Busy",
-    "dnq": "Do Not Qualify",
+    "busy": "Not Interested",
+    "dnq": "DNQ",
     "qualified": "Qualified",
     "neutral": "Neutral",
-    "repeatpitch": "Repeat Pitch"
+    "unkown": "Unkown",
 }
 
 ADMIN_CATEGORY_MAPPING = {
@@ -45,7 +43,8 @@ ADMIN_CATEGORY_MAPPING = {
     "qualified": "Qualified",
     "neutral": "Neutral",
     "repeatpitch": "Repeat Pitch",
-    "interested": "Interested"
+    "interested": "Interested",
+    "unkown": "Unkown",
 }
 
 
@@ -84,6 +83,7 @@ class DashboardFilters(BaseModel):
     start_time: str
     end_date: str
     end_time: str
+    sort_order: str
     selected_categories: List[str]
 
 
@@ -257,7 +257,8 @@ async def get_client_campaign(
     end_time: str = Query("", description="End time HH:MM"),
     categories: List[str] = Query([], description="Selected categories"),
     page: int = Query(1, ge=1, description="Page number"),
-    page_size: int = Query(50, ge=1, le=500, description="Records per page")
+    page_size: int = Query(50, ge=1, le=500, description="Records per page"),
+    sort_order: str = Query("desc", regex="^(asc|desc)$", description="Sort order for timestamp: asc or desc")
 ):
     """Get client campaign dashboard with call records (latest stage of each call session)."""
     # Privileged roles that can see any campaign with any status
@@ -368,8 +369,8 @@ async def get_client_campaign(
             session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
             latest_calls.append(session_sorted[-1])
         
-        # Sort by timestamp descending for display
-        latest_calls.sort(key=lambda x: x['timestamp'], reverse=True)
+        # Sort by timestamp based on sort_order parameter
+        latest_calls.sort(key=lambda x: x['timestamp'], reverse=(sort_order.lower() == 'desc'))
         
         # Pagination
         total_calls = len(latest_calls)
@@ -456,6 +457,7 @@ async def get_client_campaign(
                 start_time=start_time,
                 end_date=end_date,
                 end_time=end_time,
+                sort_order=sort_order,  
                 selected_categories=categories
             ),
             pagination=PaginationInfo(

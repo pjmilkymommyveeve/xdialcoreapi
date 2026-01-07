@@ -15,24 +15,18 @@ router = APIRouter(prefix="/export", tags=["Data Export"])
 # ============== CATEGORY MAPPING ==============
 
 CATEGORY_MAPPING = {
-    "greetingresponse": "Greeting Response",
-    "notfeelinggood": "Not Feeling Good",
-    "dnc": "Do Not Call",
+    "dnc": "DNC",
     "honeypot_hardcoded": "Honeypot",
     "honeypot": "Honeypot",
     "spanishanswermachine": "Spanish Answering Machine",
     "answermachine": "Answering Machine",
-    "already": "Already Customer",
-    "rebuttal": "Rebuttal",
+    "already": "Not Interested",
     "notinterested": "Not Interested",
     "busy": "Busy",
-    "dnq": "Do Not Qualify",
+    "dnq": "DNQ",
     "qualified": "Qualified",
     "neutral": "Neutral",
-    "repeatpitch": "Repeat Pitch"
 }
-
-
 # ============== MODELS ==============
 
 class CategoryInfo(BaseModel):
