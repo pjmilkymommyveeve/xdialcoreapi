@@ -57,6 +57,54 @@ class ExportRequest(BaseModel):
 
 # ============== HELPER FUNCTIONS ==============
 
+def group_calls_by_session(calls: List[dict]) -> List[dict]:
+    """
+    Group calls by number and 2-minute sessions, returning latest stage per session.
+    Calls are considered part of the same session if they're within 2 minutes of each other.
+    """
+    # Group by number first
+    calls_by_number = {}
+    for call in calls:
+        number = call['number']
+        if number not in calls_by_number:
+            calls_by_number[number] = []
+        calls_by_number[number].append(call)
+    
+    # Process each number's calls
+    latest_calls = []
+    for number, number_calls in calls_by_number.items():
+        # Sort by timestamp
+        sorted_calls = sorted(number_calls, key=lambda x: x['timestamp'])
+        
+        # Group into 2-minute sessions
+        sessions = []
+        current_session = []
+        
+        for call in sorted_calls:
+            if not current_session:
+                current_session.append(call)
+            else:
+                # Check if within 2 minutes of the last call in current session
+                time_diff = call['timestamp'] - current_session[-1]['timestamp']
+                if time_diff <= timedelta(minutes=2):
+                    current_session.append(call)
+                else:
+                    # Start new session
+                    sessions.append(current_session)
+                    current_session = [call]
+        
+        # Add the last session
+        if current_session:
+            sessions.append(current_session)
+        
+        # Get latest stage from each session
+        for session in sessions:
+            latest_stage_call = max(session, key=lambda x: x['stage'])
+            latest_calls.append(latest_stage_call)
+    
+    return latest_calls
+
+
 async def get_user_client_id(conn, user_id: int, roles: List[str]) -> Optional[int]:
     """
     Get the client_id that the user has access to.
@@ -117,58 +165,6 @@ async def verify_export_access(conn, campaign_id: int, user_id: int, roles: List
     return dict(campaign)
 
 
-def group_calls_by_duration(calls: List[dict], duration_minutes: int = 2) -> List[dict]:
-    """
-    Group calls for the same number within a specified duration window.
-    Each group represents a single "call instance" (removes retries/reconnections).
-    Returns only the latest call from each group.
-    
-    Args:
-        calls: List of call records (should already be at latest stage per call)
-        duration_minutes: Time window in minutes to group calls (default: 2)
-    
-    Returns:
-        List of calls with duplicates within duration removed (one per call instance)
-    """
-    if not calls:
-        return []
-    
-    # Sort all calls by number and timestamp
-    sorted_calls = sorted(calls, key=lambda x: (x['number'], x['timestamp']))
-    
-    grouped_calls = []
-    
-    i = 0
-    while i < len(sorted_calls):
-        current_call = sorted_calls[i]
-        current_number = current_call['number']
-        current_timestamp = current_call['timestamp']
-        
-        # Find all calls for same number within duration window
-        group = [current_call]
-        j = i + 1
-        
-        while j < len(sorted_calls) and sorted_calls[j]['number'] == current_number:
-            time_diff = sorted_calls[j]['timestamp'] - current_timestamp
-            
-            if time_diff <= timedelta(minutes=duration_minutes):
-                # Within window, part of same call instance
-                group.append(sorted_calls[j])
-                j += 1
-            else:
-                # Beyond window, start of new call instance
-                break
-        
-        # From this group, select the latest call (highest stage, then latest timestamp)
-        latest_call = max(group, key=lambda x: (x['stage'] or 0, x['timestamp']))
-        grouped_calls.append(latest_call)
-        
-        # Move to next group
-        i = j if j > i + 1 else i + 1
-    
-    return grouped_calls
-
-
 # ============== ENDPOINTS ==============
 
 @router.get("/{campaign_id}/options", response_model=ExportOptionsResponse)
@@ -203,58 +199,76 @@ async def get_export_options(
         list_ids_rows = await conn.fetch(list_ids_query, campaign_id)
         list_ids = [row['list_id'] for row in list_ids_rows]
         
-        # Get latest stage for each call (by call id)
-        latest_stages_query = """
-            SELECT id, number, MAX(stage) as max_stage
-            FROM calls
-            WHERE client_campaign_model_id = $1
-            GROUP BY id, number
-        """
-        latest_stages_rows = await conn.fetch(latest_stages_query, campaign_id)
-        latest_stages = {row['id']: row['max_stage'] for row in latest_stages_rows}
-        
-        # Get all calls at their latest stage
+        # Get all calls
         all_calls_query = """
-            SELECT c.id, c.number, c.stage, c.timestamp, 
-                   rc.name as category_name, rc.color as category_color
+            SELECT c.number, c.stage, c.timestamp, rc.name as category_name, rc.color as category_color
             FROM calls c
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             WHERE c.client_campaign_model_id = $1
-            ORDER BY c.timestamp
+            ORDER BY c.number, c.timestamp
         """
         all_calls = await conn.fetch(all_calls_query, campaign_id)
         
-        # Filter to latest stage for each call
-        latest_stage_calls = []
-        for call in all_calls:
-            if call['id'] in latest_stages and call['stage'] == latest_stages[call['id']]:
-                latest_stage_calls.append(dict(call))
+        # Convert to list of dicts for processing
+        calls_list = [dict(call) for call in all_calls]
         
-        # Apply 2-minute grouping to identify unique call instances
-        grouped_calls = group_calls_by_duration(latest_stage_calls, duration_minutes=2)
+        # Group by 2-minute sessions and get latest stage per session
+        latest_stage_calls = group_calls_by_session(calls_list)
         
-        # Count categories from grouped calls (only categories with count > 0)
-        category_counts = {}
-        category_colors = {}
+        # Get all categories from database that are in the mapping
+        categories_query = "SELECT id, name, color FROM response_categories ORDER BY name"
+        db_categories = await conn.fetch(categories_query)
         
-        for call in grouped_calls:
+        # Filter to only mapped categories
+        mapped_categories = []
+        for db_cat in db_categories:
+            original_name = db_cat['name'] or 'UNKNOWN'
+            if original_name in CATEGORY_MAPPING:
+                mapped_categories.append(db_cat)
+        
+        # Count categories from filtered calls
+        category_counts_raw = {}
+        for call in latest_stage_calls:
             if call['category_name']:
                 cat_name = call['category_name']
-                combined_name = CATEGORY_MAPPING.get(cat_name, cat_name)
-                
-                if combined_name not in category_counts:
-                    category_counts[combined_name] = 0
-                    category_colors[combined_name] = call['category_color'] or '#6B7280'
-                
-                category_counts[combined_name] += 1
+                # Only count if in mapping
+                if cat_name in CATEGORY_MAPPING:
+                    if cat_name not in category_counts_raw:
+                        category_counts_raw[cat_name] = {
+                            'name': cat_name,
+                            'color': call['category_color'] or '#6B7280',
+                            'count': 0
+                        }
+                    category_counts_raw[cat_name]['count'] += 1
         
-        # Build categories list (only include categories with count > 0)
+        # Initialize combined counts and colors
+        combined_counts = {}
+        category_colors = {}
+        
+        # Initialize all mapped categories with 0 counts
+        for db_cat in mapped_categories:
+            original_name = db_cat['name'] or 'UNKNOWN'
+            combined_name = CATEGORY_MAPPING[original_name]
+            
+            if combined_name not in combined_counts:
+                combined_counts[combined_name] = 0
+                category_colors[combined_name] = db_cat['color'] or '#6B7280'
+        
+        # Add actual counts from calls
+        for cat_data in category_counts_raw.values():
+            original_name = cat_data['name']
+            combined_name = CATEGORY_MAPPING[original_name]
+            combined_counts[combined_name] += cat_data['count']
+            if not category_colors.get(combined_name):
+                category_colors[combined_name] = cat_data['color']
+        
+        # Build categories list
         all_categories = []
-        for combined_name in sorted(category_counts.keys()):
+        for combined_name in sorted(combined_counts.keys()):
             all_categories.append(CategoryInfo(
                 name=combined_name.capitalize(),
                 color=category_colors.get(combined_name, '#6B7280'),
-                count=category_counts[combined_name],
+                count=combined_counts[combined_name],
                 original_name=combined_name
             ))
         
@@ -265,7 +279,7 @@ async def get_export_options(
             model_name=campaign['model_name'],
             list_ids=list_ids,
             all_categories=all_categories,
-            total_records=len(grouped_calls)
+            total_records=len(latest_stage_calls)
         )
 
 
@@ -314,7 +328,9 @@ async def download_export(
                 if cat in reverse_mapping:
                     original_names.extend(reverse_mapping[cat])
                 else:
-                    original_names.append(cat)
+                    # Only add if it's in the mapping
+                    if cat in CATEGORY_MAPPING.values():
+                        original_names.append(cat)
             
             if original_names:
                 param_count += 1
@@ -347,7 +363,7 @@ async def download_export(
             except ValueError:
                 pass
         
-        # Fetch calls with filters applied
+        # Fetch calls
         calls_query = f"""
             SELECT c.id, c.number, c.list_id, c.timestamp, c.stage,
                    c.transferred, c.transcription,
@@ -356,25 +372,24 @@ async def download_export(
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             LEFT JOIN voices v ON c.voice_id = v.id
             WHERE {' AND '.join(where_clauses)}
-            ORDER BY c.timestamp
+            ORDER BY c.number, c.timestamp
         """
         all_calls = await conn.fetch(calls_query, *params)
         
-        # Get latest stage for each call in the filtered set
-        latest_stages = {}
-        for call in all_calls:
-            call_id = call['id']
-            if call_id not in latest_stages or call['stage'] > latest_stages[call_id]:
-                latest_stages[call_id] = call['stage']
+        # Convert to list of dicts
+        calls_list = [dict(call) for call in all_calls]
         
-        # Filter to latest stage for each call
-        latest_stage_calls = []
-        for call in all_calls:
-            if call['stage'] == latest_stages[call['id']]:
-                latest_stage_calls.append(dict(call))
+        # Group by 2-minute sessions and get latest stage per session
+        filtered_calls = group_calls_by_session(calls_list)
         
-        # Apply 2-minute grouping to identify unique call instances
-        filtered_calls = group_calls_by_duration(latest_stage_calls, duration_minutes=2)
+        # Filter out categories not in mapping
+        filtered_calls = [
+            call for call in filtered_calls 
+            if not call['category_name'] or call['category_name'] in CATEGORY_MAPPING
+        ]
+        
+        # Sort by timestamp descending for export
+        filtered_calls.sort(key=lambda x: x['timestamp'], reverse=True)
         
         # Create CSV in memory
         output = StringIO()
