@@ -44,7 +44,7 @@ ADMIN_CATEGORY_MAPPING = {
     "neutral": "Neutral",
     "repeatpitch": "Repeat Pitch",
     "interested": "Interested",
-    "unkown": "Unkown",
+    "unkown": "Unclear Response",
 }
 
 
