@@ -383,24 +383,34 @@ async def get_client_campaign(
         all_categories_query = "SELECT id, name, color FROM response_categories ORDER BY name"
         db_categories = await conn.fetch(all_categories_query)
         
+        # Filter to only mapped categories (exclude empty string mappings)
+        mapped_categories = []
+        for db_cat in db_categories:
+            original_name = db_cat['name'] or 'UNKNOWN'
+            if original_name in CLIENT_CATEGORY_MAPPING and CLIENT_CATEGORY_MAPPING[original_name] != "":
+                mapped_categories.append(db_cat)
+        
         category_counts_raw = {}
         for call in latest_calls:
             if call['category_name']:
                 cat_name = call['category_name']
-                if cat_name not in category_counts_raw:
-                    category_counts_raw[cat_name] = {
-                        'name': cat_name,
-                        'color': call['category_color'] or '#6B7280',
-                        'count': 0
-                    }
-                category_counts_raw[cat_name]['count'] += 1
+                # Only count if in mapping and not empty string
+                if cat_name in CLIENT_CATEGORY_MAPPING and CLIENT_CATEGORY_MAPPING[cat_name] != "":
+                    if cat_name not in category_counts_raw:
+                        category_counts_raw[cat_name] = {
+                            'name': cat_name,
+                            'color': call['category_color'] or '#6B7280',
+                            'count': 0
+                        }
+                    category_counts_raw[cat_name]['count'] += 1
         
         combined_counts = {}
         category_colors = {}
         
-        for db_cat in db_categories:
+        # Initialize only mapped categories with 0 counts
+        for db_cat in mapped_categories:
             original_name = db_cat['name'] or 'UNKNOWN'
-            combined_name = CLIENT_CATEGORY_MAPPING.get(original_name, original_name)
+            combined_name = CLIENT_CATEGORY_MAPPING[original_name]
             
             if combined_name not in combined_counts:
                 combined_counts[combined_name] = 0
@@ -408,7 +418,7 @@ async def get_client_campaign(
         
         for cat_data in category_counts_raw.values():
             original_name = cat_data['name']
-            combined_name = CLIENT_CATEGORY_MAPPING.get(original_name, original_name)
+            combined_name = CLIENT_CATEGORY_MAPPING[original_name]
             combined_counts[combined_name] += cat_data['count']
             if not category_colors.get(combined_name):
                 category_colors[combined_name] = cat_data['color']
