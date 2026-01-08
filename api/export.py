@@ -407,7 +407,7 @@ async def download_export(
                 call['id'],
                 call['number'],
                 call['list_id'] or '',
-                combined_category.capitalize(),
+                combined_category,
                 call['timestamp'].strftime('%Y-%m-%d %H:%M:%S'),
                 'Yes' if call['transferred'] else 'No',
                 call['stage'] or 0
