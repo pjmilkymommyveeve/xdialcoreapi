@@ -426,7 +426,7 @@ async def get_client_campaign(
         all_categories = []
         for combined_name in sorted(combined_counts.keys()):
             all_categories.append(CategoryCount(
-                name=combined_name.capitalize(),
+                name=combined_name,
                 color=category_colors.get(combined_name, '#6B7280'),
                 count=combined_counts[combined_name],
                 original_name=combined_name
@@ -441,7 +441,7 @@ async def get_client_campaign(
                 id=call['id'],
                 number=call['number'],
                 list_id=call['list_id'] or 'N/A',
-                category=combined_category.capitalize(),
+                category=combined_category,
                 category_color=call['category_color'] or '#6B7280',
                 timestamp=call['timestamp'].strftime('%m/%d/%Y, %H:%M:%S'),
                 stage=call['stage'] or 0,
@@ -656,7 +656,7 @@ async def get_admin_campaign_dashboard(
         all_categories = []
         for combined_name in sorted(combined_counts.keys()):
             all_categories.append(CategoryCount(
-                name=combined_name.capitalize(),
+                name=combined_name,
                 color=category_colors.get(combined_name, '#6B7280'),
                 count=combined_counts[combined_name],
                 original_name=combined_name
@@ -680,7 +680,7 @@ async def get_admin_campaign_dashboard(
                 
                 stage_details.append(CallStageDetail(
                     stage=stage_call['stage'] or 0,
-                    category=stage_combined.capitalize(),
+                    category=stage_combined,
                     category_color=stage_call['category_color'] or '#6B7280',
                     voice=stage_call['voice_name'] or 'Unknown',
                     timestamp=stage_call['timestamp'].strftime('%m/%d/%Y, %H:%M:%S'),
@@ -691,7 +691,7 @@ async def get_admin_campaign_dashboard(
                 id=latest_call['id'],
                 number=latest_call['number'],
                 list_id=latest_call['list_id'] or 'N/A',
-                latest_category=combined_category.capitalize(),
+                latest_category=combined_category,
                 latest_category_color=latest_call['category_color'] or '#6B7280',
                 latest_stage=latest_call['stage'] or 0,
                 first_timestamp=first_call['timestamp'].strftime('%m/%d/%Y, %H:%M:%S'),
