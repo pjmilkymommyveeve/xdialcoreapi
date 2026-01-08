@@ -234,7 +234,6 @@ async def get_export_options(
             total_records=len(latest_stage_calls)
         )
 
-
 @router.post("/{campaign_id}/download")
 async def download_export(
     campaign_id: int,
@@ -256,10 +255,9 @@ async def download_export(
         # Verify access
         campaign = await verify_export_access(conn, campaign_id, user_id, roles)
         
-        # Build date filter clauses for latest stages query
-        date_where_clauses = ["client_campaign_model_id = $1"]
-        date_params = [campaign_id]
-        date_param_count = 1
+        # Parse dates once
+        start_dt = None
+        end_dt = None
         
         if export_request.start_date:
             try:
@@ -267,9 +265,6 @@ async def download_export(
                 if export_request.start_time:
                     time_obj = datetime.strptime(export_request.start_time, '%H:%M').time()
                     start_dt = datetime.combine(start_dt.date(), time_obj)
-                date_param_count += 1
-                date_where_clauses.append(f"timestamp >= ${date_param_count}")
-                date_params.append(start_dt)
             except ValueError:
                 pass
         
@@ -281,11 +276,23 @@ async def download_export(
                     end_dt = datetime.combine(end_dt.date(), time_obj)
                 else:
                     end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
-                date_param_count += 1
-                date_where_clauses.append(f"timestamp <= ${date_param_count}")
-                date_params.append(end_dt)
             except ValueError:
                 pass
+        
+        # Build date filter clauses for latest stages query
+        date_where_clauses = ["client_campaign_model_id = $1"]
+        date_params = [campaign_id]
+        date_param_count = 1
+        
+        if start_dt:
+            date_param_count += 1
+            date_where_clauses.append(f"timestamp >= ${date_param_count}")
+            date_params.append(start_dt)
+        
+        if end_dt:
+            date_param_count += 1
+            date_where_clauses.append(f"timestamp <= ${date_param_count}")
+            date_params.append(end_dt)
         
         # Get latest stages with date filtering applied
         latest_stages_query = f"""
@@ -328,31 +335,15 @@ async def download_export(
                 where_clauses.append(f"rc.name = ANY(${param_count})")
                 params.append(original_names)
         
-        if export_request.start_date:
-            try:
-                start_dt = datetime.strptime(export_request.start_date, '%Y-%m-%d')
-                if export_request.start_time:
-                    time_obj = datetime.strptime(export_request.start_time, '%H:%M').time()
-                    start_dt = datetime.combine(start_dt.date(), time_obj)
-                param_count += 1
-                where_clauses.append(f"c.timestamp >= ${param_count}")
-                params.append(start_dt)
-            except ValueError:
-                pass
+        if start_dt:
+            param_count += 1
+            where_clauses.append(f"c.timestamp >= ${param_count}")
+            params.append(start_dt)
         
-        if export_request.end_date:
-            try:
-                end_dt = datetime.strptime(export_request.end_date, '%Y-%m-%d')
-                if export_request.end_time:
-                    time_obj = datetime.strptime(export_request.end_time, '%H:%M').time()
-                    end_dt = datetime.combine(end_dt.date(), time_obj)
-                else:
-                    end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
-                param_count += 1
-                where_clauses.append(f"c.timestamp <= ${param_count}")
-                params.append(end_dt)
-            except ValueError:
-                pass
+        if end_dt:
+            param_count += 1
+            where_clauses.append(f"c.timestamp <= ${param_count}")
+            params.append(end_dt)
         
         # Fetch calls
         calls_query = f"""
@@ -377,23 +368,23 @@ async def download_export(
         output = StringIO()
         writer = csv.writer(output)
         writer.writerow([
-        'Call ID', 'Phone Number', 'List ID', 'Category', 'Timestamp',
-        'Transferred', 'Stage'
-                ])
+            'Call ID', 'Phone Number', 'List ID', 'Category', 'Timestamp',
+            'Transferred', 'Stage'
+        ])
         
         for call in filtered_calls:
             original_category = call['category_name'] or 'Unknown'
             combined_category = CATEGORY_MAPPING.get(original_category, original_category)
             
             writer.writerow([
-            call['id'],
-            call['number'],
-            call['list_id'] or '',
-            combined_category.capitalize(),
-            call['timestamp'].strftime('%Y-%m-%d %H:%M:%S'),
-            'Yes' if call['transferred'] else 'No',
-            call['stage'] or 0
-                        ])
+                call['id'],
+                call['number'],
+                call['list_id'] or '',
+                combined_category.capitalize(),
+                call['timestamp'].strftime('%Y-%m-%d %H:%M:%S'),
+                'Yes' if call['transferred'] else 'No',
+                call['stage'] or 0
+            ])
         
         # Prepare response
         output.seek(0)
