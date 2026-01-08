@@ -266,7 +266,7 @@ async def get_export_options(
         all_categories = []
         for combined_name in sorted(combined_counts.keys()):
             all_categories.append(CategoryInfo(
-                name=combined_name.capitalize(),
+                name=combined_name,
                 color=category_colors.get(combined_name, '#6B7280'),
                 count=combined_counts[combined_name],
                 original_name=combined_name
