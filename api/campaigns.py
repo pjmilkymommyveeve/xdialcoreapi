@@ -12,20 +12,31 @@ router = APIRouter(prefix="/campaigns", tags=["Campaigns"])
 # ============== CATEGORY MAPPINGS ==============
 
 CLIENT_CATEGORY_MAPPING = {
-    "notfeelinggood": "",
-    "dnc": "DNC",
-    "honeypot_hardcoded": "Honeypot",
-    "honeypot": "Honeypot",
     "spanishanswermachine": "Answering Machine",
     "answermachine": "Answering Machine",
+
+    "dnc": "DNC",
+    "dnq": "Do Not Qualify",
+    "honeypot": "Honeypot",
+
+    "unknown": "Unclear Response",
+
+    "busy": "Not Interested",
     "already": "Not Interested",
     "notinterested": "Not Interested",
-    "busy": "Not Interested",
-    "dnq": "DNQ",
+    "rebuttal": "Not Interested",
+    "donttransfer": "Not Interested",
+
     "qualified": "Qualified",
+    "interested": "Qualified",
+
     "neutral": "Neutral",
-    "unkown": "Unkown",
+
+    "inaudible": "DAIR",
+    "usersilent": "User Silent",
+    "userhangup": "User Hangup",
 }
+
 
 ADMIN_CATEGORY_MAPPING = {
     "greetingresponse": "Greeting Response",
