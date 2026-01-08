@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from io import StringIO
 import csv
 from core.dependencies import require_roles
@@ -117,6 +117,58 @@ async def verify_export_access(conn, campaign_id: int, user_id: int, roles: List
     return dict(campaign)
 
 
+def group_calls_by_duration(calls: List[dict], duration_minutes: int = 2) -> List[dict]:
+    """
+    Group calls for the same number within a specified duration window.
+    Each group represents a single "call instance" (removes retries/reconnections).
+    Returns only the latest call from each group.
+    
+    Args:
+        calls: List of call records (should already be at latest stage per call)
+        duration_minutes: Time window in minutes to group calls (default: 2)
+    
+    Returns:
+        List of calls with duplicates within duration removed (one per call instance)
+    """
+    if not calls:
+        return []
+    
+    # Sort all calls by number and timestamp
+    sorted_calls = sorted(calls, key=lambda x: (x['number'], x['timestamp']))
+    
+    grouped_calls = []
+    
+    i = 0
+    while i < len(sorted_calls):
+        current_call = sorted_calls[i]
+        current_number = current_call['number']
+        current_timestamp = current_call['timestamp']
+        
+        # Find all calls for same number within duration window
+        group = [current_call]
+        j = i + 1
+        
+        while j < len(sorted_calls) and sorted_calls[j]['number'] == current_number:
+            time_diff = sorted_calls[j]['timestamp'] - current_timestamp
+            
+            if time_diff <= timedelta(minutes=duration_minutes):
+                # Within window, part of same call instance
+                group.append(sorted_calls[j])
+                j += 1
+            else:
+                # Beyond window, start of new call instance
+                break
+        
+        # From this group, select the latest call (highest stage, then latest timestamp)
+        latest_call = max(group, key=lambda x: (x['stage'] or 0, x['timestamp']))
+        grouped_calls.append(latest_call)
+        
+        # Move to next group
+        i = j if j > i + 1 else i + 1
+    
+    return grouped_calls
+
+
 # ============== ENDPOINTS ==============
 
 @router.get("/{campaign_id}/options", response_model=ExportOptionsResponse)
@@ -151,76 +203,58 @@ async def get_export_options(
         list_ids_rows = await conn.fetch(list_ids_query, campaign_id)
         list_ids = [row['list_id'] for row in list_ids_rows]
         
-        # Get latest stage for each number
+        # Get latest stage for each call (by call id)
         latest_stages_query = """
-            SELECT number, MAX(stage) as max_stage
+            SELECT id, number, MAX(stage) as max_stage
             FROM calls
             WHERE client_campaign_model_id = $1
-            GROUP BY number
+            GROUP BY id, number
         """
         latest_stages_rows = await conn.fetch(latest_stages_query, campaign_id)
-        latest_stages = {row['number']: row['max_stage'] for row in latest_stages_rows}
+        latest_stages = {row['id']: row['max_stage'] for row in latest_stages_rows}
         
-        # Get all calls at latest stage
+        # Get all calls at their latest stage
         all_calls_query = """
-            SELECT c.number, c.stage, rc.name as category_name, rc.color as category_color
+            SELECT c.id, c.number, c.stage, c.timestamp, 
+                   rc.name as category_name, rc.color as category_color
             FROM calls c
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             WHERE c.client_campaign_model_id = $1
+            ORDER BY c.timestamp
         """
         all_calls = await conn.fetch(all_calls_query, campaign_id)
         
-        # Filter to latest stage only
+        # Filter to latest stage for each call
         latest_stage_calls = []
         for call in all_calls:
-            if call['number'] in latest_stages and call['stage'] == latest_stages[call['number']]:
-                latest_stage_calls.append(call)
+            if call['id'] in latest_stages and call['stage'] == latest_stages[call['id']]:
+                latest_stage_calls.append(dict(call))
         
-        # Get all categories from database
-        categories_query = "SELECT id, name, color FROM response_categories ORDER BY name"
-        db_categories = await conn.fetch(categories_query)
+        # Apply 2-minute grouping to identify unique call instances
+        grouped_calls = group_calls_by_duration(latest_stage_calls, duration_minutes=2)
         
-        # Count categories from filtered calls
-        category_counts_raw = {}
-        for call in latest_stage_calls:
-            if call['category_name']:
-                cat_name = call['category_name']
-                if cat_name not in category_counts_raw:
-                    category_counts_raw[cat_name] = {
-                        'name': cat_name,
-                        'color': call['category_color'] or '#6B7280',
-                        'count': 0
-                    }
-                category_counts_raw[cat_name]['count'] += 1
-        
-        # Initialize combined counts and colors
-        combined_counts = {}
+        # Count categories from grouped calls (only categories with count > 0)
+        category_counts = {}
         category_colors = {}
         
-        # First, initialize all categories from database with 0 counts
-        for db_cat in db_categories:
-            original_name = db_cat['name'] or 'UNKNOWN'
-            combined_name = CATEGORY_MAPPING.get(original_name, original_name)
-            
-            if combined_name not in combined_counts:
-                combined_counts[combined_name] = 0
-                category_colors[combined_name] = db_cat['color'] or '#6B7280'
+        for call in grouped_calls:
+            if call['category_name']:
+                cat_name = call['category_name']
+                combined_name = CATEGORY_MAPPING.get(cat_name, cat_name)
+                
+                if combined_name not in category_counts:
+                    category_counts[combined_name] = 0
+                    category_colors[combined_name] = call['category_color'] or '#6B7280'
+                
+                category_counts[combined_name] += 1
         
-        # Then, add actual counts from calls
-        for cat_data in category_counts_raw.values():
-            original_name = cat_data['name']
-            combined_name = CATEGORY_MAPPING.get(original_name, original_name)
-            combined_counts[combined_name] += cat_data['count']
-            if not category_colors.get(combined_name):
-                category_colors[combined_name] = cat_data['color']
-        
-        # Build categories list
+        # Build categories list (only include categories with count > 0)
         all_categories = []
-        for combined_name in sorted(combined_counts.keys()):
+        for combined_name in sorted(category_counts.keys()):
             all_categories.append(CategoryInfo(
                 name=combined_name.capitalize(),
                 color=category_colors.get(combined_name, '#6B7280'),
-                count=combined_counts[combined_name],
+                count=category_counts[combined_name],
                 original_name=combined_name
             ))
         
@@ -231,8 +265,9 @@ async def get_export_options(
             model_name=campaign['model_name'],
             list_ids=list_ids,
             all_categories=all_categories,
-            total_records=len(latest_stage_calls)
+            total_records=len(grouped_calls)
         )
+
 
 @router.post("/{campaign_id}/download")
 async def download_export(
@@ -254,55 +289,6 @@ async def download_export(
     async with pool.acquire() as conn:
         # Verify access
         campaign = await verify_export_access(conn, campaign_id, user_id, roles)
-        
-        # Parse dates once
-        start_dt = None
-        end_dt = None
-        
-        if export_request.start_date:
-            try:
-                start_dt = datetime.strptime(export_request.start_date, '%Y-%m-%d')
-                if export_request.start_time:
-                    time_obj = datetime.strptime(export_request.start_time, '%H:%M').time()
-                    start_dt = datetime.combine(start_dt.date(), time_obj)
-            except ValueError:
-                pass
-        
-        if export_request.end_date:
-            try:
-                end_dt = datetime.strptime(export_request.end_date, '%Y-%m-%d')
-                if export_request.end_time:
-                    time_obj = datetime.strptime(export_request.end_time, '%H:%M').time()
-                    end_dt = datetime.combine(end_dt.date(), time_obj)
-                else:
-                    end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
-            except ValueError:
-                pass
-        
-        # Build date filter clauses for latest stages query
-        date_where_clauses = ["client_campaign_model_id = $1"]
-        date_params = [campaign_id]
-        date_param_count = 1
-        
-        if start_dt:
-            date_param_count += 1
-            date_where_clauses.append(f"timestamp >= ${date_param_count}")
-            date_params.append(start_dt)
-        
-        if end_dt:
-            date_param_count += 1
-            date_where_clauses.append(f"timestamp <= ${date_param_count}")
-            date_params.append(end_dt)
-        
-        # Get latest stages with date filtering applied
-        latest_stages_query = f"""
-            SELECT number, MAX(stage) as max_stage
-            FROM calls
-            WHERE {' AND '.join(date_where_clauses)}
-            GROUP BY number
-        """
-        latest_stages_rows = await conn.fetch(latest_stages_query, *date_params)
-        latest_stages = {row['number']: row['max_stage'] for row in latest_stages_rows}
         
         # Build query with filters
         where_clauses = ["c.client_campaign_model_id = $1"]
@@ -335,17 +321,33 @@ async def download_export(
                 where_clauses.append(f"rc.name = ANY(${param_count})")
                 params.append(original_names)
         
-        if start_dt:
-            param_count += 1
-            where_clauses.append(f"c.timestamp >= ${param_count}")
-            params.append(start_dt)
+        if export_request.start_date:
+            try:
+                start_dt = datetime.strptime(export_request.start_date, '%Y-%m-%d')
+                if export_request.start_time:
+                    time_obj = datetime.strptime(export_request.start_time, '%H:%M').time()
+                    start_dt = datetime.combine(start_dt.date(), time_obj)
+                param_count += 1
+                where_clauses.append(f"c.timestamp >= ${param_count}")
+                params.append(start_dt)
+            except ValueError:
+                pass
         
-        if end_dt:
-            param_count += 1
-            where_clauses.append(f"c.timestamp <= ${param_count}")
-            params.append(end_dt)
+        if export_request.end_date:
+            try:
+                end_dt = datetime.strptime(export_request.end_date, '%Y-%m-%d')
+                if export_request.end_time:
+                    time_obj = datetime.strptime(export_request.end_time, '%H:%M').time()
+                    end_dt = datetime.combine(end_dt.date(), time_obj)
+                else:
+                    end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
+                param_count += 1
+                where_clauses.append(f"c.timestamp <= ${param_count}")
+                params.append(end_dt)
+            except ValueError:
+                pass
         
-        # Fetch calls
+        # Fetch calls with filters applied
         calls_query = f"""
             SELECT c.id, c.number, c.list_id, c.timestamp, c.stage,
                    c.transferred, c.transcription,
@@ -354,15 +356,25 @@ async def download_export(
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             LEFT JOIN voices v ON c.voice_id = v.id
             WHERE {' AND '.join(where_clauses)}
-            ORDER BY c.timestamp DESC
+            ORDER BY c.timestamp
         """
         all_calls = await conn.fetch(calls_query, *params)
         
-        # Filter to latest stage
-        filtered_calls = []
+        # Get latest stage for each call in the filtered set
+        latest_stages = {}
         for call in all_calls:
-            if call['number'] in latest_stages and call['stage'] == latest_stages[call['number']]:
-                filtered_calls.append(call)
+            call_id = call['id']
+            if call_id not in latest_stages or call['stage'] > latest_stages[call_id]:
+                latest_stages[call_id] = call['stage']
+        
+        # Filter to latest stage for each call
+        latest_stage_calls = []
+        for call in all_calls:
+            if call['stage'] == latest_stages[call['id']]:
+                latest_stage_calls.append(dict(call))
+        
+        # Apply 2-minute grouping to identify unique call instances
+        filtered_calls = group_calls_by_duration(latest_stage_calls, duration_minutes=2)
         
         # Create CSV in memory
         output = StringIO()
