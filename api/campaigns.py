@@ -33,6 +33,7 @@ CLIENT_CATEGORY_MAPPING = {
     "neutral": "Neutral",
 
     "inaudible": "DAIR",
+    "notresponding" : "DAIR",
     "usersilent": "User Silent",
     "userhangup": "User Hangup",
 }
