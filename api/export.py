@@ -256,14 +256,45 @@ async def download_export(
         # Verify access
         campaign = await verify_export_access(conn, campaign_id, user_id, roles)
         
-        # Get latest stages
-        latest_stages_query = """
+        # Build date filter clauses for latest stages query
+        date_where_clauses = ["client_campaign_model_id = $1"]
+        date_params = [campaign_id]
+        date_param_count = 1
+        
+        if export_request.start_date:
+            try:
+                start_dt = datetime.strptime(export_request.start_date, '%Y-%m-%d')
+                if export_request.start_time:
+                    time_obj = datetime.strptime(export_request.start_time, '%H:%M').time()
+                    start_dt = datetime.combine(start_dt.date(), time_obj)
+                date_param_count += 1
+                date_where_clauses.append(f"timestamp >= ${date_param_count}")
+                date_params.append(start_dt)
+            except ValueError:
+                pass
+        
+        if export_request.end_date:
+            try:
+                end_dt = datetime.strptime(export_request.end_date, '%Y-%m-%d')
+                if export_request.end_time:
+                    time_obj = datetime.strptime(export_request.end_time, '%H:%M').time()
+                    end_dt = datetime.combine(end_dt.date(), time_obj)
+                else:
+                    end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
+                date_param_count += 1
+                date_where_clauses.append(f"timestamp <= ${date_param_count}")
+                date_params.append(end_dt)
+            except ValueError:
+                pass
+        
+        # Get latest stages with date filtering applied
+        latest_stages_query = f"""
             SELECT number, MAX(stage) as max_stage
             FROM calls
-            WHERE client_campaign_model_id = $1
+            WHERE {' AND '.join(date_where_clauses)}
             GROUP BY number
         """
-        latest_stages_rows = await conn.fetch(latest_stages_query, campaign_id)
+        latest_stages_rows = await conn.fetch(latest_stages_query, *date_params)
         latest_stages = {row['number']: row['max_stage'] for row in latest_stages_rows}
         
         # Build query with filters
