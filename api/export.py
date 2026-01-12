@@ -70,53 +70,51 @@ class ExportRequest(BaseModel):
 
 
 # ============== HELPER FUNCTIONS ==============
-
 def group_calls_by_session(calls: List[dict]) -> List[dict]:
     """
     Group calls by number and 2-minute sessions, returning latest stage per session.
     Calls are considered part of the same session if they're within 2 minutes of each other.
     """
-    # Group by number first
-    calls_by_number = {}
-    for call in calls:
-        number = call['number']
-        if number not in calls_by_number:
-            calls_by_number[number] = []
-        calls_by_number[number].append(call)
+    if not calls:
+        return []
     
-    # Process each number's calls
-    latest_calls = []
-    for number, number_calls in calls_by_number.items():
-        # Sort by timestamp
-        sorted_calls = sorted(number_calls, key=lambda x: x['timestamp'])
-        
-        # Group into 2-minute sessions
-        sessions = []
-        current_session = []
-        
-        for call in sorted_calls:
-            if not current_session:
+    # Sort by number and timestamp
+    sorted_calls = sorted(calls, key=lambda x: (x['number'], x['timestamp']))
+    
+    sessions = []
+    current_session = []
+    
+    for call in sorted_calls:
+        if not current_session:
+            current_session.append(call)
+        else:
+            last_call = current_session[-1]
+            
+            # Check if same number and within duration window
+            same_number = call['number'] == last_call['number']
+            time_diff = call['timestamp'] - last_call['timestamp']
+            within_window = time_diff <= timedelta(minutes=2)
+            
+            if same_number and within_window:
                 current_session.append(call)
             else:
-                # Check if within 2 minutes of the last call in current session
-                time_diff = call['timestamp'] - current_session[-1]['timestamp']
-                if time_diff <= timedelta(minutes=2):
-                    current_session.append(call)
-                else:
-                    # Start new session
-                    sessions.append(current_session)
-                    current_session = [call]
-        
-        # Add the last session
-        if current_session:
-            sessions.append(current_session)
-        
-        # Get latest stage from each session
-        for session in sessions:
-            latest_stage_call = max(session, key=lambda x: x['stage'])
-            latest_calls.append(latest_stage_call)
+                # Start new session
+                sessions.append(current_session)
+                current_session = [call]
+    
+    # Add last session
+    if current_session:
+        sessions.append(current_session)
+    
+    # Get latest stage from each session (by sorting by stage number)
+    latest_calls = []
+    for session in sessions:
+        # Sort by stage to get the latest
+        session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
+        latest_calls.append(session_sorted[-1])  # Get the last one (highest stage)
     
     return latest_calls
+
 
 
 async def get_user_client_id(conn, user_id: int, roles: List[str]) -> Optional[int]:
