@@ -516,7 +516,8 @@ async def get_admin_campaign_dashboard(
     end_time: str = Query("", description="End time HH:MM"),
     categories: List[str] = Query([], description="Selected categories"),
     page: int = Query(1, ge=1, description="Page number"),
-    page_size: int = Query(50, ge=1, le=500, description="Records per page")
+    page_size: int = Query(50, ge=1, le=500, description="Records per page"),
+    sort_order: str = Query("desc", regex="^(asc|desc)$", description="Sort order for timestamp: asc or desc")
 ):
     """Get admin campaign dashboard with detailed call records including all stages (grouped by 2-minute sessions)."""
     pool = await get_db()
@@ -748,6 +749,7 @@ async def get_admin_campaign_dashboard(
                 start_time=start_time,
                 end_date=end_date,
                 end_time=end_time,
+                sort_order=sort_order,
                 selected_categories=categories
             ),
             pagination=PaginationInfo(
