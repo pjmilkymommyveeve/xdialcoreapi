@@ -182,10 +182,22 @@ async def verify_export_access(conn, campaign_id: int, user_id: int, roles: List
 @router.get("/{campaign_id}/options", response_model=ExportOptionsResponse)
 async def get_export_options(
     campaign_id: int,
+    list_ids: Optional[str] = None,  # Comma-separated list IDs
+    start_date: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_date: Optional[str] = None,
+    end_time: Optional[str] = None,
     user_info: Dict = Depends(require_roles(['admin', 'onboarding', 'client']))
 ):
     """
-    Get available filters and counts for export.
+    Get available filters and counts for export with optional pre-filtering.
+    Query parameters:
+    - list_ids: Comma-separated list of list IDs (e.g., "101,102,103")
+    - start_date: Start date in YYYY-MM-DD format
+    - start_time: Start time in HH:MM format
+    - end_date: End date in YYYY-MM-DD format
+    - end_time: End time in HH:MM format
+    
     Privileged roles: Can export any campaign
     Client role: Can only export their own campaigns
     Client member role: NOT allowed (not in require_roles)
@@ -199,7 +211,7 @@ async def get_export_options(
         # Verify access
         campaign = await verify_export_access(conn, campaign_id, user_id, roles)
         
-        # Get unique list IDs
+        # Get unique list IDs (always show all available lists)
         list_ids_query = """
             SELECT DISTINCT list_id
             FROM calls
@@ -209,20 +221,60 @@ async def get_export_options(
             ORDER BY list_id
         """
         list_ids_rows = await conn.fetch(list_ids_query, campaign_id)
-        list_ids = [row['list_id'] for row in list_ids_rows]
+        all_list_ids = [row['list_id'] for row in list_ids_rows]
         
-        # Get all calls
-        all_calls_query = """
+        # Build query with filters for call counts
+        where_clauses = ["c.client_campaign_model_id = $1"]
+        params = [campaign_id]
+        param_count = 1
+        
+        # Parse and apply list_ids filter
+        if list_ids:
+            selected_lists = [lid.strip() for lid in list_ids.split(',') if lid.strip()]
+            if selected_lists:
+                param_count += 1
+                where_clauses.append(f"c.list_id = ANY(${param_count})")
+                params.append(selected_lists)
+        
+        # Apply date/time filters
+        if start_date:
+            try:
+                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                if start_time:
+                    time_obj = datetime.strptime(start_time, '%H:%M').time()
+                    start_dt = datetime.combine(start_dt.date(), time_obj)
+                param_count += 1
+                where_clauses.append(f"c.timestamp >= ${param_count}")
+                params.append(start_dt)
+            except ValueError:
+                pass
+        
+        if end_date:
+            try:
+                end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+                if end_time:
+                    time_obj = datetime.strptime(end_time, '%H:%M').time()
+                    end_dt = datetime.combine(end_dt.date(), time_obj)
+                else:
+                    end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
+                param_count += 1
+                where_clauses.append(f"c.timestamp <= ${param_count}")
+                params.append(end_dt)
+            except ValueError:
+                pass
+        
+        # Get filtered calls
+        filtered_calls_query = f"""
             SELECT c.number, c.stage, c.timestamp, rc.name as category_name, rc.color as category_color
             FROM calls c
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
-            WHERE c.client_campaign_model_id = $1
+            WHERE {' AND '.join(where_clauses)}
             ORDER BY c.number, c.timestamp
         """
-        all_calls = await conn.fetch(all_calls_query, campaign_id)
+        filtered_calls = await conn.fetch(filtered_calls_query, *params)
         
         # Convert to list of dicts for processing
-        calls_list = [dict(call) for call in all_calls]
+        calls_list = [dict(call) for call in filtered_calls]
         
         # Group by 2-minute sessions and get latest stage per session
         latest_stage_calls = group_calls_by_session(calls_list)
@@ -266,7 +318,7 @@ async def get_export_options(
                 combined_counts[combined_name] = 0
                 category_colors[combined_name] = db_cat['color'] or '#6B7280'
         
-        # Add actual counts from calls
+        # Add actual counts from filtered calls
         for cat_data in category_counts_raw.values():
             original_name = cat_data['name']
             combined_name = CATEGORY_MAPPING[original_name]
@@ -289,9 +341,9 @@ async def get_export_options(
             campaign_id=campaign['id'],
             campaign_name=campaign['campaign_name'],
             model_name=campaign['model_name'],
-            list_ids=list_ids,
-            all_categories=all_categories,
-            total_records=len(latest_stage_calls)
+            list_ids=all_list_ids,  # Always return all available list IDs
+            all_categories=all_categories,  # Counts based on current filters
+            total_records=len(latest_stage_calls)  # Total based on current filters
         )
 
 
