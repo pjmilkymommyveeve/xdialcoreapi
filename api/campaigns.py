@@ -72,12 +72,13 @@ class CallRecord(BaseModel):
     stage: int
     has_transcription: bool
     transcription: str
-
+    transferred: bool
 
 class CategoryCount(BaseModel):
     name: str
     color: str
     count: int
+    transferred_count: int
     original_name: str
 
 
@@ -199,7 +200,7 @@ async def get_user_client_id(conn, user_id: int, roles: List[str]) -> Optional[i
     """
     Get the client_id that the user has access to.
     For 'client' role: returns user_id as client_id
-    For 'client_member' role: returns employer's client_id
+    For 'client_member' role: returns employer's client_ids
     For other roles: returns None (they can access any)
     """
     if 'client' in roles:
@@ -357,7 +358,7 @@ async def get_client_campaign(
                 params.append(original_names)
         
         calls_query = f"""
-            SELECT c.id, c.number, c.list_id, c.timestamp, c.stage,
+            SELECT c.id, c.number, c.list_id, c.timestamp, c.stage, c.transferred,
                    c.transcription, rc.name as category_name, rc.color as category_color,
                    v.name as voice_name
             FROM calls c
@@ -412,11 +413,15 @@ async def get_client_campaign(
                         category_counts_raw[cat_name] = {
                             'name': cat_name,
                             'color': call['category_color'] or '#6B7280',
-                            'count': 0
+                            'count': 0,
+                            'transferred_count': 0
                         }
                     category_counts_raw[cat_name]['count'] += 1
+                    if call.get('transferred'):
+                        category_counts_raw[cat_name]['transferred_count'] += 1
         
         combined_counts = {}
+        combined_transferred_counts = {}
         category_colors = {}
         
         # Initialize only mapped categories with 0 counts
@@ -426,12 +431,14 @@ async def get_client_campaign(
             
             if combined_name not in combined_counts:
                 combined_counts[combined_name] = 0
+                combined_transferred_counts[combined_name] = 0
                 category_colors[combined_name] = db_cat['color'] or '#6B7280'
         
         for cat_data in category_counts_raw.values():
             original_name = cat_data['name']
             combined_name = CLIENT_CATEGORY_MAPPING[original_name]
             combined_counts[combined_name] += cat_data['count']
+            combined_transferred_counts[combined_name] += cat_data['transferred_count']
             if not category_colors.get(combined_name):
                 category_colors[combined_name] = cat_data['color']
         
@@ -441,6 +448,7 @@ async def get_client_campaign(
                 name=combined_name,
                 color=category_colors.get(combined_name, '#6B7280'),
                 count=combined_counts[combined_name],
+                transferred_count=combined_transferred_counts[combined_name],
                 original_name=combined_name
             ))
         
@@ -458,7 +466,8 @@ async def get_client_campaign(
                 timestamp=call['timestamp'].strftime('%m/%d/%Y, %H:%M:%S'),
                 stage=call['stage'] or 0,
                 has_transcription=bool(call['transcription']),
-                transcription=call['transcription'] or 'No transcript available'
+                transcription=call['transcription'] or 'No transcript available',
+                transferred=call.get('transferred', False)
             ))
         
         return CampaignDashboardResponse(
