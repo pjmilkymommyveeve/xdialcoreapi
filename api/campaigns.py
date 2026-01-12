@@ -652,11 +652,15 @@ async def get_admin_campaign_dashboard(
                     category_counts_raw[cat_name] = {
                         'name': cat_name,
                         'color': latest_call['category_color'] or '#6B7280',
-                        'count': 0
+                        'count': 0,
+                        'transferred_count': 0
                     }
                 category_counts_raw[cat_name]['count'] += 1
+                if latest_call.get('transferred'):
+                    category_counts_raw[cat_name]['transferred_count'] += 1
         
         combined_counts = {}
+        combined_transferred_counts = {}
         category_colors = {}
         
         for db_cat in db_categories:
@@ -665,12 +669,14 @@ async def get_admin_campaign_dashboard(
             
             if combined_name not in combined_counts:
                 combined_counts[combined_name] = 0
+                combined_transferred_counts[combined_name] = 0
                 category_colors[combined_name] = db_cat['color'] or '#6B7280'
         
         for cat_data in category_counts_raw.values():
             original_name = cat_data['name']
             combined_name = ADMIN_CATEGORY_MAPPING.get(original_name, original_name)
             combined_counts[combined_name] += cat_data['count']
+            combined_transferred_counts[combined_name] += cat_data['transferred_count']
             if not category_colors.get(combined_name):
                 category_colors[combined_name] = cat_data['color']
         
@@ -680,6 +686,7 @@ async def get_admin_campaign_dashboard(
                 name=combined_name,
                 color=category_colors.get(combined_name, '#6B7280'),
                 count=combined_counts[combined_name],
+                transferred_count=combined_transferred_counts[combined_name],
                 original_name=combined_name
             ))
         
