@@ -940,10 +940,7 @@ async def get_category_timeseries(
                     start_dt = datetime.combine(start_dt.date(), time_obj)
                 # If no start_time, start_dt remains at 00:00:00 (midnight)
             except ValueError:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid start_date or start_time format. Use YYYY-MM-DD for dates and HH:MM for times."
-                )
+                pass
         
         if end_date:
             try:
@@ -954,16 +951,13 @@ async def get_category_timeseries(
                 else:
                     end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
             except ValueError:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid end_date or end_time format. Use YYYY-MM-DD for dates and HH:MM for times."
-                )
+                pass
         
-        # Validate that we have both dates for time series
+        # If we don't have valid dates after parsing, return error
         if not start_dt or not end_dt:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Both start_date and end_date are required for time series analysis."
+                detail="Valid start_date and end_date are required for time series analysis."
             )
         
         # Fetch all calls
