@@ -154,6 +154,26 @@ class AdminCampaignDashboardResponse(BaseModel):
     filters: DashboardFilters
     pagination: PaginationInfo
 
+# ============== TRANSFER METRICS MODELS ==============
+
+class TransferMetrics(BaseModel):
+    a_grade_transfers: int
+    b_grade_transfers: int
+    drop_offs: int
+    total_calls: int
+
+
+class CategoryInterval(BaseModel):
+    interval_start: str
+    interval_end: str
+    categories: List[CategoryCount]
+
+
+class CategoryTimeSeriesResponse(BaseModel):
+    intervals: List[CategoryInterval]
+    start_date: str
+    end_date: str
+    interval_minutes: int
 
 # ============== HELPER FUNCTIONS ==============
 
@@ -760,4 +780,247 @@ async def get_admin_campaign_dashboard(
                 has_next=page < total_pages,
                 has_prev=page > 1
             )
+        )
+    
+# ============== TRANSFER METRICS ENDPOINT ==============
+
+@router.get("/{campaign_id}/transfer-metrics", response_model=TransferMetrics)
+async def get_transfer_metrics(
+    campaign_id: int,
+    user_info: Dict = Depends(require_roles(['admin', 'onboarding', 'client', 'client_member'])),
+    start_date: str = Query("", description="Start date YYYY-MM-DD"),
+    start_time: str = Query("", description="Start time HH:MM"),
+    end_date: str = Query("", description="End date YYYY-MM-DD"),
+    end_time: str = Query("", description="End time HH:MM")
+):
+    """Get transfer metrics: A-grade, B-grade transfers and drop-offs."""
+    PRIVILEGED_ROLES = ['admin', 'onboarding', 'qa']
+    
+    user_id = user_info['user_id']
+    roles = user_info['roles']
+    
+    is_privileged = any(role in PRIVILEGED_ROLES for role in roles)
+    allowed_statuses = ['Enabled', 'Testing', 'Disabled'] if is_privileged else ['Enabled', 'Testing']
+    
+    pool = await get_db()
+    
+    async with pool.acquire() as conn:
+        # Verify access
+        campaign = await verify_campaign_access(conn, campaign_id, user_id, roles, allowed_statuses)
+        
+        # Default to today if no filters
+        if not start_date and not end_date:
+            today = date.today()
+            start_date = today.strftime('%Y-%m-%d')
+            end_date = today.strftime('%Y-%m-%d')
+        
+        # Build query with filters
+        where_clauses = ["c.client_campaign_model_id = $1"]
+        params = [campaign_id]
+        param_count = 1
+        
+        if start_date:
+            try:
+                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                if start_time:
+                    time_obj = datetime.strptime(start_time, '%H:%M').time()
+                    start_dt = datetime.combine(start_dt.date(), time_obj)
+                param_count += 1
+                where_clauses.append(f"c.timestamp >= ${param_count}")
+                params.append(start_dt)
+            except ValueError:
+                pass
+        
+        if end_date:
+            try:
+                end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+                if end_time:
+                    time_obj = datetime.strptime(end_time, '%H:%M').time()
+                    end_dt = datetime.combine(end_dt.date(), time_obj)
+                else:
+                    end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
+                param_count += 1
+                where_clauses.append(f"c.timestamp <= ${param_count}")
+                params.append(end_dt)
+            except ValueError:
+                pass
+        
+        calls_query = f"""
+            SELECT c.id, c.number, c.timestamp, c.stage, c.transferred,
+                   rc.name as category_name
+            FROM calls c
+            LEFT JOIN response_categories rc ON c.response_category_id = rc.id
+            WHERE {' AND '.join(where_clauses)}
+            ORDER BY c.number, c.timestamp, c.stage
+        """
+        all_calls = await conn.fetch(calls_query, *params)
+        
+        # Convert to list of dicts for grouping
+        calls_list = [dict(call) for call in all_calls]
+        
+        # Group calls into sessions (2-minute window)
+        call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
+        
+        # Get latest stage from each session
+        latest_calls = []
+        for session in call_sessions:
+            session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
+            latest_calls.append(session_sorted[-1])
+        
+        # Calculate metrics using CLIENT_CATEGORY_MAPPING
+        a_grade_transfers = 0
+        b_grade_transfers = 0
+        drop_offs = 0
+        
+        # Map "qualified" category original names
+        qualified_originals = [orig for orig, combined in CLIENT_CATEGORY_MAPPING.items() 
+                              if combined == "Qualified"]
+        
+        for call in latest_calls:
+            original_category = call['category_name'] or ''
+            combined_category = CLIENT_CATEGORY_MAPPING.get(original_category, original_category)
+            is_transferred = call.get('transferred', False)
+            
+            if combined_category == "Qualified" and is_transferred:
+                a_grade_transfers += 1
+            elif combined_category != "Qualified" and is_transferred:
+                b_grade_transfers += 1
+            else:
+                drop_offs += 1
+        
+        return TransferMetrics(
+            a_grade_transfers=a_grade_transfers,
+            b_grade_transfers=b_grade_transfers,
+            drop_offs=drop_offs,
+            total_calls=len(latest_calls)
+        )
+    
+# ============== CATEGORY TIME SERIES ENDPOINT ==============
+
+@router.get("/{campaign_id}/category-timeseries", response_model=CategoryTimeSeriesResponse)
+async def get_category_timeseries(
+    campaign_id: int,
+    user_info: Dict = Depends(require_roles(['admin', 'onboarding', 'client', 'client_member'])),
+    start_date: str = Query(..., description="Start date YYYY-MM-DD"),
+    start_time: str = Query("00:00", description="Start time HH:MM"),
+    end_date: str = Query(..., description="End date YYYY-MM-DD"),
+    end_time: str = Query("23:59", description="End time HH:MM"),
+    interval: int = Query(5, ge=1, le=1440, description="Interval in minutes (1-1440)")
+):
+    """Get category counts grouped by time intervals."""
+    PRIVILEGED_ROLES = ['admin', 'onboarding', 'qa']
+    
+    user_id = user_info['user_id']
+    roles = user_info['roles']
+    
+    is_privileged = any(role in PRIVILEGED_ROLES for role in roles)
+    allowed_statuses = ['Enabled', 'Testing', 'Disabled'] if is_privileged else ['Enabled', 'Testing']
+    
+    pool = await get_db()
+    
+    async with pool.acquire() as conn:
+        # Verify access
+        campaign = await verify_campaign_access(conn, campaign_id, user_id, roles, allowed_statuses)
+        
+        # Parse dates
+        try:
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+            if start_time:
+                time_obj = datetime.strptime(start_time, '%H:%M').time()
+                start_dt = datetime.combine(start_dt.date(), time_obj)
+            
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+            if end_time:
+                time_obj = datetime.strptime(end_time, '%H:%M').time()
+                end_dt = datetime.combine(end_dt.date(), time_obj)
+            else:
+                end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid date/time format"
+            )
+        
+        # Fetch all calls
+        calls_query = """
+            SELECT c.id, c.number, c.timestamp, c.stage, c.transferred,
+                   rc.name as category_name, rc.color as category_color
+            FROM calls c
+            LEFT JOIN response_categories rc ON c.response_category_id = rc.id
+            WHERE c.client_campaign_model_id = $1
+              AND c.timestamp >= $2
+              AND c.timestamp <= $3
+            ORDER BY c.number, c.timestamp, c.stage
+        """
+        all_calls = await conn.fetch(calls_query, campaign_id, start_dt, end_dt)
+        
+        # Convert to list of dicts for grouping
+        calls_list = [dict(call) for call in all_calls]
+        
+        # Group calls into sessions
+        call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
+        
+        # Get latest stage from each session
+        latest_calls = []
+        for session in call_sessions:
+            session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
+            latest_calls.append(session_sorted[-1])
+        
+        # Create time intervals
+        intervals = []
+        current_start = start_dt
+        
+        while current_start < end_dt:
+            current_end = min(current_start + timedelta(minutes=interval), end_dt)
+            
+            # Filter calls for this interval
+            interval_calls = [
+                call for call in latest_calls
+                if current_start <= call['timestamp'] < current_end
+            ]
+            
+            # Count categories using CLIENT_CATEGORY_MAPPING
+            category_counts = {}
+            category_transferred_counts = {}
+            category_colors = {}
+            
+            for call in interval_calls:
+                original_category = call['category_name'] or 'Unknown'
+                # Only count if in mapping and not empty string
+                if original_category in CLIENT_CATEGORY_MAPPING and CLIENT_CATEGORY_MAPPING[original_category] != "":
+                    combined_category = CLIENT_CATEGORY_MAPPING[original_category]
+                    
+                    if combined_category not in category_counts:
+                        category_counts[combined_category] = 0
+                        category_transferred_counts[combined_category] = 0
+                        category_colors[combined_category] = call['category_color'] or '#6B7280'
+                    
+                    category_counts[combined_category] += 1
+                    if call.get('transferred'):
+                        category_transferred_counts[combined_category] += 1
+            
+            # Format categories
+            categories = []
+            for combined_name in sorted(category_counts.keys()):
+                categories.append(CategoryCount(
+                    name=combined_name,
+                    color=category_colors[combined_name],
+                    count=category_counts[combined_name],
+                    transferred_count=category_transferred_counts[combined_name],
+                    original_name=combined_name
+                ))
+            
+            intervals.append(CategoryInterval(
+                interval_start=current_start.strftime('%Y-%m-%d %H:%M:%S'),
+                interval_end=current_end.strftime('%Y-%m-%d %H:%M:%S'),
+                categories=categories
+            ))
+            
+            current_start = current_end
+        
+        return CategoryTimeSeriesResponse(
+            intervals=intervals,
+            start_date=start_date,
+            end_date=end_date,
+            interval_minutes=interval
         )
