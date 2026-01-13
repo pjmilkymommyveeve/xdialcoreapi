@@ -929,10 +929,6 @@ async def get_category_timeseries(
             end_date = today.strftime('%Y-%m-%d')
         
         # Build datetime filters - exactly matching other endpoints
-        where_clauses = []
-        params = [campaign_id]
-        param_count = 1
-        
         start_dt = None
         end_dt = None
         
@@ -996,10 +992,16 @@ async def get_category_timeseries(
             current_end = min(current_start + timedelta(minutes=interval), end_dt)
             
             # Filter calls for this interval
-            interval_calls = [
-                call for call in latest_calls
-                if current_start <= call['timestamp'] < current_end
-            ]
+            # Handle timezone comparison - make timestamps naive for comparison
+            interval_calls = []
+            for call in latest_calls:
+                call_timestamp = call['timestamp']
+                # Convert timezone-aware timestamp to naive if needed
+                if call_timestamp.tzinfo is not None:
+                    call_timestamp = call_timestamp.replace(tzinfo=None)
+                
+                if current_start <= call_timestamp < current_end:
+                    interval_calls.append(call)
             
             # Count categories using CLIENT_CATEGORY_MAPPING
             category_counts = {}
