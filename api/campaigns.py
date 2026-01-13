@@ -901,10 +901,10 @@ async def get_transfer_metrics(
 async def get_category_timeseries(
     campaign_id: int,
     user_info: Dict = Depends(require_roles(['admin', 'onboarding', 'client', 'client_member'])),
-    start_date: str = Query(..., description="Start date YYYY-MM-DD"),
-    start_time: str = Query("00:00", description="Start time HH:MM"),
-    end_date: str = Query(..., description="End date YYYY-MM-DD"),
-    end_time: str = Query("23:59", description="End time HH:MM"),
+    start_date: str = Query("", description="Start date YYYY-MM-DD"),
+    start_time: str = Query("", description="Start time HH:MM"),
+    end_date: str = Query("", description="End date YYYY-MM-DD"),
+    end_time: str = Query("", description="End time HH:MM"),
     interval: int = Query(5, ge=1, le=1440, description="Interval in minutes (1-1440)")
 ):
     """Get category counts grouped by time intervals."""
@@ -922,23 +922,48 @@ async def get_category_timeseries(
         # Verify access
         campaign = await verify_campaign_access(conn, campaign_id, user_id, roles, allowed_statuses)
         
-        # Parse dates
-        try:
-            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-            if start_time:
-                time_obj = datetime.strptime(start_time, '%H:%M').time()
-                start_dt = datetime.combine(start_dt.date(), time_obj)
-            
-            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
-            if end_time:
-                time_obj = datetime.strptime(end_time, '%H:%M').time()
-                end_dt = datetime.combine(end_dt.date(), time_obj)
-            else:
-                end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
-        except ValueError:
+        # Default to today if no date filters provided
+        if not start_date and not end_date:
+            today = date.today()
+            start_date = today.strftime('%Y-%m-%d')
+            end_date = today.strftime('%Y-%m-%d')
+        
+        # Build datetime filters (same logic as other endpoints)
+        start_dt = None
+        end_dt = None
+        
+        if start_date:
+            try:
+                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                if start_time:
+                    time_obj = datetime.strptime(start_time, '%H:%M').time()
+                    start_dt = datetime.combine(start_dt.date(), time_obj)
+                # If no start_time, start_dt remains at 00:00:00 (midnight)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid start_date or start_time format. Use YYYY-MM-DD for dates and HH:MM for times."
+                )
+        
+        if end_date:
+            try:
+                end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+                if end_time:
+                    time_obj = datetime.strptime(end_time, '%H:%M').time()
+                    end_dt = datetime.combine(end_dt.date(), time_obj)
+                else:
+                    end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid end_date or end_time format. Use YYYY-MM-DD for dates and HH:MM for times."
+                )
+        
+        # Validate that we have both dates for time series
+        if not start_dt or not end_dt:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid date/time format"
+                detail="Both start_date and end_date are required for time series analysis."
             )
         
         # Fetch all calls
@@ -957,7 +982,7 @@ async def get_category_timeseries(
         # Convert to list of dicts for grouping
         calls_list = [dict(call) for call in all_calls]
         
-        # Group calls into sessions
+        # Group calls into sessions (2-minute window)
         call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
         
         # Get latest stage from each session
