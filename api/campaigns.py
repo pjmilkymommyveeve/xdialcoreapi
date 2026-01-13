@@ -928,7 +928,11 @@ async def get_category_timeseries(
             start_date = today.strftime('%Y-%m-%d')
             end_date = today.strftime('%Y-%m-%d')
         
-        # Build datetime filters (same logic as other endpoints)
+        # Build datetime filters - exactly matching other endpoints
+        where_clauses = []
+        params = [campaign_id]
+        param_count = 1
+        
         start_dt = None
         end_dt = None
         
@@ -938,7 +942,6 @@ async def get_category_timeseries(
                 if start_time:
                     time_obj = datetime.strptime(start_time, '%H:%M').time()
                     start_dt = datetime.combine(start_dt.date(), time_obj)
-                # If no start_time, start_dt remains at 00:00:00 (midnight)
             except ValueError:
                 pass
         
@@ -953,7 +956,7 @@ async def get_category_timeseries(
             except ValueError:
                 pass
         
-        # If we don't have valid dates after parsing, return error
+        # Ensure we have valid dates for time series
         if not start_dt or not end_dt:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
