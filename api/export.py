@@ -25,7 +25,7 @@ CATEGORY_MAPPING = {
     "unknown": "Unclear Response",
 
     "busy": "Busy",
-    "already": "Already",
+    "already": "Not Interested",
     "notinterested": "Not Interested",
     "rebuttal": "Not Interested",
     "donttransfer": "Not Interested",
