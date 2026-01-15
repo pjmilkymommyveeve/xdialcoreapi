@@ -295,43 +295,39 @@ async def get_client_campaign(
     sort_order: str = Query("desc", regex="^(asc|desc)$", description="Sort order for timestamp: asc or desc")
 ):
     """Get client campaign dashboard with call records (latest stage of each call session)."""
-    # Privileged roles that can see any campaign with any status
     PRIVILEGED_ROLES = ['admin', 'onboarding', 'qa']
     
     user_id = user_info['user_id']
     roles = user_info['roles']
     
-    # Determine allowed statuses based on roles
     is_privileged = any(role in PRIVILEGED_ROLES for role in roles)
     allowed_statuses = ['Enabled', 'Testing','Disabled'] if is_privileged else ['Enabled', 'Testing']
     
     pool = await get_db()
     
     async with pool.acquire() as conn:
-        # Verify access
         campaign = await verify_campaign_access(conn, campaign_id, user_id, roles, allowed_statuses)
         
-        # Default to today if no filters
         has_any_filter = any([search, list_id, start_date, end_date, categories])
         if not has_any_filter:
             today = date.today()
             start_date = today.strftime('%Y-%m-%d')
             end_date = today.strftime('%Y-%m-%d')
         
-        # Build query with filters
-        where_clauses = ["c.client_campaign_model_id = $1"]
-        params = [campaign_id]
-        param_count = 1
+        # Build base query WITHOUT category filter for counting all categories
+        base_where_clauses = ["c.client_campaign_model_id = $1"]
+        base_params = [campaign_id]
+        base_param_count = 1
         
         if search:
-            param_count += 1
-            where_clauses.append(f"(c.number ILIKE ${param_count} OR rc.name ILIKE ${param_count})")
-            params.append(f"%{search}%")
+            base_param_count += 1
+            base_where_clauses.append(f"(c.number ILIKE ${base_param_count} OR rc.name ILIKE ${base_param_count})")
+            base_params.append(f"%{search}%")
         
         if list_id:
-            param_count += 1
-            where_clauses.append(f"c.list_id ILIKE ${param_count}")
-            params.append(f"%{list_id}%")
+            base_param_count += 1
+            base_where_clauses.append(f"c.list_id ILIKE ${base_param_count}")
+            base_params.append(f"%{list_id}%")
         
         if start_date:
             try:
@@ -339,9 +335,9 @@ async def get_client_campaign(
                 if start_time:
                     time_obj = datetime.strptime(start_time, '%H:%M').time()
                     start_dt = datetime.combine(start_dt.date(), time_obj)
-                param_count += 1
-                where_clauses.append(f"c.timestamp >= ${param_count}")
-                params.append(start_dt)
+                base_param_count += 1
+                base_where_clauses.append(f"c.timestamp >= ${base_param_count}")
+                base_params.append(start_dt)
             except ValueError:
                 pass
         
@@ -353,11 +349,36 @@ async def get_client_campaign(
                     end_dt = datetime.combine(end_dt.date(), time_obj)
                 else:
                     end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
-                param_count += 1
-                where_clauses.append(f"c.timestamp <= ${param_count}")
-                params.append(end_dt)
+                base_param_count += 1
+                base_where_clauses.append(f"c.timestamp <= ${base_param_count}")
+                base_params.append(end_dt)
             except ValueError:
                 pass
+        
+        # Query for category counts (without category filter)
+        base_calls_query = f"""
+            SELECT c.id, c.number, c.list_id, c.timestamp, c.stage, c.transferred,
+                   c.transcription, rc.name as category_name, rc.color as category_color,
+                   v.name as voice_name
+            FROM calls c
+            LEFT JOIN response_categories rc ON c.response_category_id = rc.id
+            LEFT JOIN voices v ON c.voice_id = v.id
+            WHERE {' AND '.join(base_where_clauses)}
+            ORDER BY c.number, c.timestamp, c.stage
+        """
+        base_calls = await conn.fetch(base_calls_query, *base_params)
+        base_calls_list = [dict(call) for call in base_calls]
+        base_call_sessions = group_calls_by_session(base_calls_list, duration_minutes=2)
+        
+        base_latest_calls = []
+        for session in base_call_sessions:
+            session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
+            base_latest_calls.append(session_sorted[-1])
+        
+        # Build filtered query WITH category filter for display
+        where_clauses = base_where_clauses.copy()
+        params = base_params.copy()
+        param_count = base_param_count
         
         if categories:
             reverse_mapping = {}
@@ -378,6 +399,7 @@ async def get_client_campaign(
                 where_clauses.append(f"rc.name = ANY(${param_count})")
                 params.append(original_names)
         
+        # Query for filtered calls (with category filter if applied)
         calls_query = f"""
             SELECT c.id, c.number, c.list_id, c.timestamp, c.stage, c.transferred,
                    c.transcription, rc.name as category_name, rc.color as category_color,
@@ -389,35 +411,27 @@ async def get_client_campaign(
             ORDER BY c.number, c.timestamp, c.stage
         """
         all_calls = await conn.fetch(calls_query, *params)
-        
-        # Convert to list of dicts for grouping
         calls_list = [dict(call) for call in all_calls]
-        
-        # Group calls into sessions (2-minute window)
         call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
         
-        # Get latest stage from each session
         latest_calls = []
         for session in call_sessions:
-            # Sort by stage to get the latest
             session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
             latest_calls.append(session_sorted[-1])
         
-        # Sort by timestamp based on sort_order parameter
         latest_calls.sort(key=lambda x: x['timestamp'], reverse=(sort_order.lower() == 'desc'))
         
-        # Pagination
+        # Pagination on filtered calls
         total_calls = len(latest_calls)
         total_pages = (total_calls + page_size - 1) // page_size if total_calls > 0 else 1
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
         paginated_calls = latest_calls[start_idx:end_idx]
         
-        # Get categories with counts
+        # Get categories with counts from BASE (unfiltered by category) calls
         all_categories_query = "SELECT id, name, color FROM response_categories ORDER BY name"
         db_categories = await conn.fetch(all_categories_query)
         
-        # Filter to only mapped categories (exclude empty string mappings)
         mapped_categories = []
         for db_cat in db_categories:
             original_name = db_cat['name'] or 'UNKNOWN'
@@ -425,10 +439,9 @@ async def get_client_campaign(
                 mapped_categories.append(db_cat)
         
         category_counts_raw = {}
-        for call in latest_calls:
+        for call in base_latest_calls:  # Use base_latest_calls for counting
             if call['category_name']:
                 cat_name = call['category_name']
-                # Only count if in mapping and not empty string
                 if cat_name in CLIENT_CATEGORY_MAPPING and CLIENT_CATEGORY_MAPPING[cat_name] != "":
                     if cat_name not in category_counts_raw:
                         category_counts_raw[cat_name] = {
@@ -445,7 +458,6 @@ async def get_client_campaign(
         combined_transferred_counts = {}
         category_colors = {}
         
-        # Initialize only mapped categories with 0 counts
         for db_cat in mapped_categories:
             original_name = db_cat['name'] or 'UNKNOWN'
             combined_name = CLIENT_CATEGORY_MAPPING[original_name]
@@ -521,7 +533,6 @@ async def get_client_campaign(
                 has_prev=page > 1
             )
         )
-
 
 # ============== ADMIN ENDPOINT ==============
 
