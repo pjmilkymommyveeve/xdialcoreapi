@@ -177,19 +177,6 @@ class CategoryTimeSeriesResponse(BaseModel):
     interval_minutes: int
 
 # ============== HELPER FUNCTIONS ==============
-async def check_campaign_is_active(conn, campaign_id: int) -> bool:
-    """Check if campaign had any calls in the last 1 minute"""
-    one_minute_ago = datetime.now() - timedelta(minutes=1)
-    
-    query = """
-        SELECT EXISTS(
-            SELECT 1 FROM calls 
-            WHERE client_campaign_model_id = $1 
-            AND timestamp >= $2
-        ) as is_active
-    """
-    result = await conn.fetchrow(query, campaign_id, one_minute_ago)
-    return result['is_active'] if result else False
 
 def group_calls_by_session(calls: List[dict], duration_minutes: int = 2) -> List[List[dict]]:
     """
@@ -287,11 +274,7 @@ async def verify_campaign_access(conn, campaign_id: int, user_id: int, roles: Li
             detail="Access denied"
         )
     
-    # Calculate is_active on the fly
-    campaign_dict = dict(campaign)
-    campaign_dict['is_active'] = await check_campaign_is_active(conn, campaign_id)
-    
-    return campaign_dict
+    return dict(campaign)
 
 # ============== CLIENT ENDPOINT ==============
 
@@ -525,7 +508,7 @@ async def get_client_campaign(
                 id=campaign['id'],
                 name=campaign['campaign_name'],
                 model=campaign['model_name'],
-                is_active=campaign['is_active']
+                is_active=False
             ),
             calls=calls_data,
             total_calls=total_calls,
@@ -594,8 +577,7 @@ async def get_admin_campaign_dashboard(
                 detail="Campaign not found"
             )
         
-        # Calculate is_active on the fly
-        is_active = await check_campaign_is_active(conn, campaign_id)
+        
         
         # Default to today if no filters
         has_any_filter = any([search, list_id, start_date, end_date, categories])
@@ -788,7 +770,7 @@ async def get_admin_campaign_dashboard(
                 id=campaign['id'],
                 name=campaign['campaign_name'],
                 model=campaign['model_name'],
-                is_active=is_active
+                is_active=False
             ),
             calls=calls_data,
             total_calls=total_calls,
