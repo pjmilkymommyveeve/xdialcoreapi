@@ -318,7 +318,7 @@ async def get_client_campaign(
             start_date = today.strftime('%Y-%m-%d')
             end_date = today.strftime('%Y-%m-%d')
         
-        # Build query with filters (WITHOUT category filter for counting all categories)
+        # Build base query with filters (WITHOUT category filter for counting all categories)
         where_clauses_without_category = ["c.client_campaign_model_id = $1"]
         params_without_category = [campaign_id]
         param_count_without_category = 1
@@ -332,6 +332,10 @@ async def get_client_campaign(
             param_count_without_category += 1
             where_clauses_without_category.append(f"c.list_id ILIKE ${param_count_without_category}")
             params_without_category.append(f"%{list_id}%")
+        
+        # Parse and store datetime objects for reuse
+        start_dt = None
+        end_dt = None
         
         if start_date:
             try:
@@ -387,31 +391,15 @@ async def get_client_campaign(
             where_clauses.append(f"c.list_id ILIKE ${param_count}")
             params.append(f"%{list_id}%")
         
-        if start_date:
-            try:
-                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-                if start_time:
-                    time_obj = datetime.strptime(start_time, '%H:%M').time()
-                    start_dt = datetime.combine(start_dt.date(), time_obj)
-                param_count += 1
-                where_clauses.append(f"c.timestamp >= ${param_count}")
-                params.append(start_dt)
-            except ValueError:
-                pass
+        if start_dt:
+            param_count += 1
+            where_clauses.append(f"c.timestamp >= ${param_count}")
+            params.append(start_dt)
         
-        if end_date:
-            try:
-                end_dt = datetime.strptime(end_date, '%Y-%m-%d')
-                if end_time:
-                    time_obj = datetime.strptime(end_time, '%H:%M').time()
-                    end_dt = datetime.combine(end_dt.date(), time_obj)
-                else:
-                    end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
-                param_count += 1
-                where_clauses.append(f"c.timestamp <= ${param_count}")
-                params.append(end_dt)
-            except ValueError:
-                pass
+        if end_dt:
+            param_count += 1
+            where_clauses.append(f"c.timestamp <= ${param_count}")
+            params.append(end_dt)
         
         if categories:
             reverse_mapping = {}
