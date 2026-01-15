@@ -4,6 +4,7 @@ from typing import List, Optional, Dict
 from datetime import datetime, date, time, timedelta
 from core.dependencies import require_roles
 from database.db import get_db
+from zoneinfo import ZoneInfo
 
 
 router = APIRouter(prefix="/campaigns", tags=["Campaigns"])
@@ -895,8 +896,6 @@ async def get_transfer_metrics(
             total_calls=len(latest_calls)
         )
 
-# Add this endpoint after the transfer metrics endpoint in your FastAPI file
-
 @router.get("/{campaign_id}/category-timeseries", response_model=CategoryTimeSeriesResponse)
 async def get_category_timeseries(
     campaign_id: int,
@@ -933,16 +932,16 @@ async def get_category_timeseries(
             start_date = today.strftime('%Y-%m-%d')
             end_date = today.strftime('%Y-%m-%d')
         
-        # Parse start datetime
+        # Parse start datetime with UTC timezone
         if start_date:
             try:
                 start_dt = datetime.strptime(start_date, '%Y-%m-%d')
                 if start_time:
                     time_obj = datetime.strptime(start_time, '%H:%M').time()
-                    start_dt = datetime.combine(start_dt.date(), time_obj)
+                    start_dt = datetime.combine(start_dt.date(), time_obj, tzinfo=ZoneInfo('UTC'))
                 else:
                     # Default to start of day
-                    start_dt = datetime.combine(start_dt.date(), time(0, 0, 0))
+                    start_dt = datetime.combine(start_dt.date(), time(0, 0, 0), tzinfo=ZoneInfo('UTC'))
             except ValueError:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -950,18 +949,18 @@ async def get_category_timeseries(
                 )
         else:
             today = date.today()
-            start_dt = datetime.combine(today, time(0, 0, 0))
+            start_dt = datetime.combine(today, time(0, 0, 0), tzinfo=ZoneInfo('UTC'))
         
-        # Parse end datetime
+        # Parse end datetime with UTC timezone
         if end_date:
             try:
                 end_dt = datetime.strptime(end_date, '%Y-%m-%d')
                 if end_time:
                     time_obj = datetime.strptime(end_time, '%H:%M').time()
-                    end_dt = datetime.combine(end_dt.date(), time_obj)
+                    end_dt = datetime.combine(end_dt.date(), time_obj, tzinfo=ZoneInfo('UTC'))
                 else:
                     # Default to end of day
-                    end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
+                    end_dt = datetime.combine(end_dt.date(), time(23, 59, 59), tzinfo=ZoneInfo('UTC'))
             except ValueError:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -969,7 +968,7 @@ async def get_category_timeseries(
                 )
         else:
             # If only start date given, end at end of same day
-            end_dt = datetime.combine(start_dt.date(), time(23, 59, 59))
+            end_dt = datetime.combine(start_dt.date(), time(23, 59, 59), tzinfo=ZoneInfo('UTC'))
         
         # Validate time range
         if start_dt >= end_dt:
