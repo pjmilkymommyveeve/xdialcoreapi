@@ -98,19 +98,6 @@ class UserInfo(BaseModel):
 
 # ============== HELPER FUNCTIONS ==============
 
-async def check_campaign_is_active(conn, campaign_id: int) -> bool:
-    """Check if campaign had any calls in the last 1 minute"""
-    one_minute_ago = datetime.now() - timedelta(minutes=1)
-    
-    query = """
-        SELECT EXISTS(
-            SELECT 1 FROM calls 
-            WHERE client_campaign_model_id = $1 
-            AND timestamp >= $2
-        ) as is_active
-    """
-    result = await conn.fetchrow(query, campaign_id, one_minute_ago)
-    return result['is_active'] if result else False
 
 async def get_user_client_id(conn, user_id: int, roles: List[str]) -> Optional[int]:
     """
