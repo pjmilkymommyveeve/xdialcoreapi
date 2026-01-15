@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from core.dependencies import require_roles
 from database.db import get_db
 
@@ -97,6 +97,20 @@ class UserInfo(BaseModel):
 
 
 # ============== HELPER FUNCTIONS ==============
+
+async def check_campaign_is_active(conn, campaign_id: int) -> bool:
+    """Check if campaign had any calls in the last 1 minute"""
+    one_minute_ago = datetime.now() - timedelta(minutes=1)
+    
+    query = """
+        SELECT EXISTS(
+            SELECT 1 FROM calls 
+            WHERE client_campaign_model_id = $1 
+            AND timestamp >= $2
+        ) as is_active
+    """
+    result = await conn.fetchrow(query, campaign_id, one_minute_ago)
+    return result['is_active'] if result else False
 
 async def get_user_client_id(conn, user_id: int, roles: List[str]) -> Optional[int]:
     """
@@ -199,8 +213,7 @@ async def get_all_clients_with_campaigns(
                 ccm.id,
                 ccm.client_id,
                 ca.name as campaign_name,
-                m.name as model_name,
-                ccm.is_active
+                m.name as model_name
             FROM client_campaign_model ccm
             JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
             JOIN campaigns ca ON cm.campaign_id = ca.id
@@ -219,6 +232,19 @@ async def get_all_clients_with_campaigns(
         """
         campaigns = await conn.fetch(campaigns_query)
         
+        # Calculate is_active for all campaigns
+        campaign_ids = [c['id'] for c in campaigns]
+        one_minute_ago = datetime.now() - timedelta(minutes=1)
+        
+        active_campaigns_query = """
+            SELECT DISTINCT client_campaign_model_id
+            FROM calls
+            WHERE client_campaign_model_id = ANY($1)
+            AND timestamp >= $2
+        """
+        active_campaign_ids = await conn.fetch(active_campaigns_query, campaign_ids, one_minute_ago)
+        active_set = {row['client_campaign_model_id'] for row in active_campaign_ids}
+        
         # Group campaigns by client
         campaigns_by_client = {}
         for campaign in campaigns:
@@ -230,7 +256,7 @@ async def get_all_clients_with_campaigns(
                 id=campaign['id'],
                 campaign_name=campaign['campaign_name'],
                 model_name=campaign['model_name'],
-                is_active=campaign['is_active']
+                is_active=campaign['id'] in active_set
             ))
         
         # Build response
@@ -250,7 +276,6 @@ async def get_all_clients_with_campaigns(
             total_clients=len(clients_list),
             clients=clients_list
         )
-
 
 @router.get("/{client_id}", response_model=ClientCampaignsListResponse)
 async def get_client_campaigns(
@@ -312,7 +337,6 @@ async def get_client_campaigns(
                 ccm.id as campaign_id,
                 ccm.start_date,
                 ccm.end_date,
-                ccm.is_active,
                 ccm.bot_count,
                 ca.id as camp_id,
                 ca.name as camp_name,
@@ -354,8 +378,19 @@ async def get_client_campaigns(
                 inactive_campaigns=0
             )
         
-        # Get campaign IDs for call stats
+        # Get campaign IDs for call stats and is_active calculation
         campaign_ids = [c['campaign_id'] for c in campaigns_data]
+        
+        # Calculate is_active for each campaign
+        one_minute_ago = datetime.now() - timedelta(minutes=1)
+        active_campaigns_query = """
+            SELECT DISTINCT client_campaign_model_id
+            FROM calls
+            WHERE client_campaign_model_id = ANY($1)
+            AND timestamp >= $2
+        """
+        active_campaign_ids = await conn.fetch(active_campaigns_query, campaign_ids, one_minute_ago)
+        active_set = {row['client_campaign_model_id'] for row in active_campaign_ids}
         
         # Fetch call statistics
         call_stats_query = """
@@ -400,7 +435,8 @@ async def get_client_campaigns(
                 )
             )
             
-            if camp['is_active']:
+            is_active = camp['campaign_id'] in active_set
+            if is_active:
                 active_count += 1
             
             status_info = None
@@ -438,7 +474,7 @@ async def get_client_campaigns(
                 transfer_setting=transfer_setting_info,
                 start_date=camp['start_date'],
                 end_date=camp['end_date'],
-                is_active=camp['is_active'],
+                is_active=is_active,
                 bot_count=camp['bot_count'],
                 status=status_info,
                 call_stats=call_stats

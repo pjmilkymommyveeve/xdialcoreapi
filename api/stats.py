@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import csv
 import io
 from core.dependencies import require_roles
@@ -91,6 +91,20 @@ class CallLookupResponse(BaseModel):
 
 
 # ============== HELPER FUNCTIONS ==============
+
+async def check_campaign_is_active(conn, campaign_id: int) -> bool:
+    """Check if campaign had any calls in the last 1 minute"""
+    one_minute_ago = datetime.now() - timedelta(minutes=1)
+    
+    query = """
+        SELECT EXISTS(
+            SELECT 1 FROM calls 
+            WHERE client_campaign_model_id = $1 
+            AND timestamp >= $2
+        ) as is_active
+    """
+    result = await conn.fetchrow(query, campaign_id, one_minute_ago)
+    return result['is_active'] if result else False
 
 def calculate_transfer_rate(transferred: int, total: int) -> float:
     """Calculate transfer rate as percentage"""
@@ -399,7 +413,7 @@ async def get_all_campaigns_transfer_stats(
         # Get all campaigns
         campaigns_query = f"""
             SELECT ccm.id, ccm.client_id, cl.name as client_name,
-                   ca.name as campaign_name, m.name as model_name, ccm.is_active,
+                   ca.name as campaign_name, m.name as model_name,
                    s.status_name as current_status
             FROM client_campaign_model ccm
             JOIN clients cl ON ccm.client_id = cl.client_id
@@ -430,6 +444,9 @@ async def get_all_campaigns_transfer_stats(
         # Process each campaign
         for campaign in campaigns:
             campaign_id = campaign['id']
+            
+            # Calculate is_active on the fly
+            is_active = await check_campaign_is_active(conn, campaign_id)
             
             # Build where clause for latest stages
             base_where = ["c.client_campaign_model_id = $1"]
@@ -503,7 +520,7 @@ async def get_all_campaigns_transfer_stats(
                 campaign_name=campaign['campaign_name'],
                 model_name=campaign['model_name'],
                 client_name=campaign['client_name'],
-                is_active=campaign['is_active'],
+                is_active=is_active,
                 current_status=campaign['current_status'],
                 total_calls=total_calls,
                 transferred_calls=total_transferred,
@@ -518,7 +535,6 @@ async def get_all_campaigns_transfer_stats(
             total_campaigns=len(campaign_stats_list),
             campaigns=campaign_stats_list
         )
-
 
 @router.get("/overall-voice-stats", response_model=OverallVoiceStatsResponse)
 async def get_overall_voice_stats(
