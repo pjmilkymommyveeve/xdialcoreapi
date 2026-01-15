@@ -894,8 +894,8 @@ async def get_transfer_metrics(
             drop_offs=drop_offs,
             total_calls=len(latest_calls)
         )
-    
-# ============== CATEGORY TIME SERIES ENDPOINT ==============
+
+# Add this endpoint after the transfer metrics endpoint in your FastAPI file
 
 @router.get("/{campaign_id}/category-timeseries", response_model=CategoryTimeSeriesResponse)
 async def get_category_timeseries(
@@ -905,42 +905,54 @@ async def get_category_timeseries(
     start_time: str = Query("", description="Start time HH:MM"),
     end_date: str = Query("", description="End date YYYY-MM-DD"),
     end_time: str = Query("", description="End time HH:MM"),
-    interval: int = Query(5, ge=1, le=1440, description="Interval in minutes (1-1440)")
+    interval_minutes: int = Query(60, ge=1, le=1440, description="Interval in minutes (1-1440)")
 ):
-    """Get category counts grouped by time intervals."""
+    """
+    Get category counts grouped by time intervals for a client's campaign.
+    Returns time-series data showing how category counts change over time.
+    Uses CLIENT_CATEGORY_MAPPING for category grouping.
+    """
     PRIVILEGED_ROLES = ['admin', 'onboarding', 'qa']
     
     user_id = user_info['user_id']
     roles = user_info['roles']
     
+    # Determine allowed statuses based on roles
     is_privileged = any(role in PRIVILEGED_ROLES for role in roles)
     allowed_statuses = ['Enabled', 'Testing', 'Disabled'] if is_privileged else ['Enabled', 'Testing']
     
     pool = await get_db()
     
     async with pool.acquire() as conn:
-        # Verify access
+        # Verify access to campaign
         campaign = await verify_campaign_access(conn, campaign_id, user_id, roles, allowed_statuses)
         
-        # Default to today if no date filters provided
+        # Default to today if no filters provided
         if not start_date and not end_date:
             today = date.today()
             start_date = today.strftime('%Y-%m-%d')
             end_date = today.strftime('%Y-%m-%d')
         
-        # Build datetime filters - exactly matching other endpoints
-        start_dt = None
-        end_dt = None
-        
+        # Parse start datetime
         if start_date:
             try:
                 start_dt = datetime.strptime(start_date, '%Y-%m-%d')
                 if start_time:
                     time_obj = datetime.strptime(start_time, '%H:%M').time()
                     start_dt = datetime.combine(start_dt.date(), time_obj)
+                else:
+                    # Default to start of day
+                    start_dt = datetime.combine(start_dt.date(), time(0, 0, 0))
             except ValueError:
-                pass
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid start date/time format. Use YYYY-MM-DD for date and HH:MM for time"
+                )
+        else:
+            today = date.today()
+            start_dt = datetime.combine(today, time(0, 0, 0))
         
+        # Parse end datetime
         if end_date:
             try:
                 end_dt = datetime.strptime(end_date, '%Y-%m-%d')
@@ -948,103 +960,146 @@ async def get_category_timeseries(
                     time_obj = datetime.strptime(end_time, '%H:%M').time()
                     end_dt = datetime.combine(end_dt.date(), time_obj)
                 else:
+                    # Default to end of day
                     end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
             except ValueError:
-                pass
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid end date/time format. Use YYYY-MM-DD for date and HH:MM for time"
+                )
+        else:
+            # If only start date given, end at end of same day
+            end_dt = datetime.combine(start_dt.date(), time(23, 59, 59))
         
-        # Ensure we have valid dates for time series
-        if not start_dt or not end_dt:
+        # Validate time range
+        if start_dt >= end_dt:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Valid start_date and end_date are required for time series analysis."
+                detail="Start date/time must be before end date/time"
             )
         
-        # Fetch all calls
+        # Efficient single query to fetch all calls in time range
         calls_query = """
-            SELECT c.id, c.number, c.timestamp, c.stage, c.transferred,
-                   rc.name as category_name, rc.color as category_color
+            SELECT 
+                c.id, 
+                c.number, 
+                c.timestamp, 
+                c.stage, 
+                c.transferred,
+                rc.name as category_name, 
+                rc.color as category_color
             FROM calls c
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             WHERE c.client_campaign_model_id = $1
-              AND c.timestamp >= $2
-              AND c.timestamp <= $3
+                AND c.timestamp >= $2
+                AND c.timestamp <= $3
             ORDER BY c.number, c.timestamp, c.stage
         """
         all_calls = await conn.fetch(calls_query, campaign_id, start_dt, end_dt)
         
-        # Convert to list of dicts for grouping
+        # Convert to list of dicts for session grouping
         calls_list = [dict(call) for call in all_calls]
         
-        # Group calls into sessions (2-minute window)
+        # Group calls into sessions (2-minute window between calls of same number)
         call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
         
-        # Get latest stage from each session
+        # Extract latest stage from each session (this represents the final outcome)
         latest_calls = []
         for session in call_sessions:
             session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
-            latest_calls.append(session_sorted[-1])
+            latest_call = session_sorted[-1]
+            latest_calls.append(latest_call)
         
-        # Create time intervals
+        # Get all categories from database to build mapping
+        all_categories_query = "SELECT name, color FROM response_categories ORDER BY name"
+        db_categories = await conn.fetch(all_categories_query)
+        
+        # Build category info using CLIENT_CATEGORY_MAPPING
+        # Only include categories that are mapped (exclude empty string mappings)
+        category_info = {}
+        for db_cat in db_categories:
+            original_name = db_cat['name'] or 'UNKNOWN'
+            
+            # Skip if not in mapping or mapped to empty string
+            if original_name not in CLIENT_CATEGORY_MAPPING:
+                continue
+            if CLIENT_CATEGORY_MAPPING[original_name] == "":
+                continue
+            
+            combined_name = CLIENT_CATEGORY_MAPPING[original_name]
+            
+            if combined_name not in category_info:
+                category_info[combined_name] = {
+                    'color': db_cat['color'] or '#6B7280',
+                    'original_names': []
+                }
+            category_info[combined_name]['original_names'].append(original_name)
+        
+        # Generate time intervals
         intervals = []
         current_start = start_dt
+        interval_delta = timedelta(minutes=interval_minutes)
         
         while current_start < end_dt:
-            current_end = min(current_start + timedelta(minutes=interval), end_dt)
-            
-            # Filter calls for this interval
-            # Handle timezone comparison - make timestamps naive for comparison
-            interval_calls = []
-            for call in latest_calls:
-                call_timestamp = call['timestamp']
-                # Convert timezone-aware timestamp to naive if needed
-                if call_timestamp.tzinfo is not None:
-                    call_timestamp = call_timestamp.replace(tzinfo=None)
-                
-                if current_start <= call_timestamp < current_end:
-                    interval_calls.append(call)
-            
-            # Count categories using CLIENT_CATEGORY_MAPPING
-            category_counts = {}
-            category_transferred_counts = {}
-            category_colors = {}
-            
-            for call in interval_calls:
-                original_category = call['category_name'] or 'Unknown'
-                # Only count if in mapping and not empty string
-                if original_category in CLIENT_CATEGORY_MAPPING and CLIENT_CATEGORY_MAPPING[original_category] != "":
-                    combined_category = CLIENT_CATEGORY_MAPPING[original_category]
-                    
-                    if combined_category not in category_counts:
-                        category_counts[combined_category] = 0
-                        category_transferred_counts[combined_category] = 0
-                        category_colors[combined_category] = call['category_color'] or '#6B7280'
-                    
-                    category_counts[combined_category] += 1
-                    if call.get('transferred'):
-                        category_transferred_counts[combined_category] += 1
-            
-            # Format categories
-            categories = []
-            for combined_name in sorted(category_counts.keys()):
-                categories.append(CategoryCount(
-                    name=combined_name,
-                    color=category_colors[combined_name],
-                    count=category_counts[combined_name],
-                    transferred_count=category_transferred_counts[combined_name],
-                    original_name=combined_name
-                ))
-            
-            intervals.append(CategoryInterval(
-                interval_start=current_start.strftime('%Y-%m-%d %H:%M:%S'),
-                interval_end=current_end.strftime('%Y-%m-%d %H:%M:%S'),
-                categories=categories
-            ))
-            
+            current_end = min(current_start + interval_delta, end_dt)
+            intervals.append({
+                'start': current_start,
+                'end': current_end,
+                'categories': {
+                    cat_name: {'count': 0, 'transferred_count': 0} 
+                    for cat_name in category_info.keys()
+                }
+            })
             current_start = current_end
         
+        # Distribute calls into their respective time intervals
+        for call in latest_calls:
+            call_timestamp = call['timestamp']
+            original_category = call['category_name'] or 'Unknown'
+            
+            # Skip if not in CLIENT_CATEGORY_MAPPING or mapped to empty string
+            if original_category not in CLIENT_CATEGORY_MAPPING:
+                continue
+            if CLIENT_CATEGORY_MAPPING[original_category] == "":
+                continue
+            
+            combined_category = CLIENT_CATEGORY_MAPPING[original_category]
+            is_transferred = call.get('transferred', False)
+            
+            # Find which interval this call belongs to
+            for interval in intervals:
+                if interval['start'] <= call_timestamp < interval['end']:
+                    if combined_category in interval['categories']:
+                        interval['categories'][combined_category]['count'] += 1
+                        if is_transferred:
+                            interval['categories'][combined_category]['transferred_count'] += 1
+                    break
+        
+        # Format response
+        response_intervals = []
+        for interval in intervals:
+            category_counts = []
+            
+            # Sort categories alphabetically for consistent ordering
+            for cat_name in sorted(interval['categories'].keys()):
+                cat_data = interval['categories'][cat_name]
+                category_counts.append(CategoryCount(
+                    name=cat_name,
+                    color=category_info[cat_name]['color'],
+                    count=cat_data['count'],
+                    transferred_count=cat_data['transferred_count'],
+                    original_name=cat_name
+                ))
+            
+            response_intervals.append(CategoryInterval(
+                interval_start=interval['start'].strftime('%Y-%m-%d %H:%M:%S'),
+                interval_end=interval['end'].strftime('%Y-%m-%d %H:%M:%S'),
+                categories=category_counts
+            ))
+        
         return CategoryTimeSeriesResponse(
-            intervals=intervals,
-            start_date=start_date,
-            end_date=end_date,
-            interval_minutes=interval
+            intervals=response_intervals,
+            start_date=start_dt.strftime('%Y-%m-%d %H:%M:%S'),
+            end_date=end_dt.strftime('%Y-%m-%d %H:%M:%S'),
+            interval_minutes=interval_minutes
         )
