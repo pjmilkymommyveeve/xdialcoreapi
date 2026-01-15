@@ -380,11 +380,14 @@ async def get_client_campaign(
         all_sessions = group_calls_by_session(all_calls_list, duration_minutes=2)
         all_latest = [sorted(s, key=lambda x: x['stage'] or 0)[-1] for s in all_sessions]
         
-        # Calculate category counts
+        # Calculate category counts from latest calls
         category_counts_raw = {}
         for call in all_latest:
             cat_name = call['category_name']
-            if not cat_name or cat_name not in CLIENT_CATEGORY_MAPPING:
+            if not cat_name:
+                continue
+            # ONLY count if in CLIENT_CATEGORY_MAPPING and not empty string
+            if cat_name not in CLIENT_CATEGORY_MAPPING:
                 continue
             if CLIENT_CATEGORY_MAPPING[cat_name] == "":
                 continue
@@ -399,20 +402,32 @@ async def get_client_campaign(
             if call.get('transferred'):
                 category_counts_raw[cat_name]['transferred_count'] += 1
         
-        # Build combined categories
+        # Build combined categories - ONLY from CLIENT_CATEGORY_MAPPING
         combined_counts = {}
         combined_transferred_counts = {}
         category_colors = {}
         
-        # Initialize from CLIENT_CATEGORY_MAPPING
-        unique_combined = set(v for v in CLIENT_CATEGORY_MAPPING.values() if v != "")
+        # Get all unique combined category names from CLIENT_CATEGORY_MAPPING
+        unique_combined = set()
+        for orig, combined in CLIENT_CATEGORY_MAPPING.items():
+            if combined != "":  # Skip empty string mappings
+                unique_combined.add(combined)
+        
+        # Initialize all combined categories with 0
         for combined_name in unique_combined:
             combined_counts[combined_name] = 0
             combined_transferred_counts[combined_name] = 0
         
-        # Get colors from database
-        db_cats_query = "SELECT name, color FROM response_categories"
-        db_cats = await conn.fetch(db_cats_query)
+        # Get colors from database for mapped categories only
+        db_cats_query = """
+            SELECT name, color 
+            FROM response_categories 
+            WHERE name = ANY($1)
+        """
+        # Get list of all original category names that are mapped
+        mapped_originals = [k for k in CLIENT_CATEGORY_MAPPING.keys() if CLIENT_CATEGORY_MAPPING[k] != ""]
+        db_cats = await conn.fetch(db_cats_query, mapped_originals)
+        
         for db_cat in db_cats:
             orig = db_cat['name']
             if orig in CLIENT_CATEGORY_MAPPING and CLIENT_CATEGORY_MAPPING[orig] != "":
@@ -420,12 +435,16 @@ async def get_client_campaign(
                 if combined not in category_colors:
                     category_colors[combined] = db_cat['color'] or '#6B7280'
         
-        # Aggregate counts
+        # Aggregate counts into combined categories
         for orig_name, data in category_counts_raw.items():
             combined = CLIENT_CATEGORY_MAPPING[orig_name]
             combined_counts[combined] += data['count']
             combined_transferred_counts[combined] += data['transferred_count']
+            # Update color if not set
+            if combined not in category_colors:
+                category_colors[combined] = data['color']
         
+        # Build final category list
         all_categories = [
             CategoryCount(
                 name=name,
@@ -443,8 +462,11 @@ async def get_client_campaign(
         p_idx_f = p_idx
         
         if categories:
+            # Build reverse mapping
             reverse_map = {}
             for orig, comb in CLIENT_CATEGORY_MAPPING.items():
+                if comb == "":  # Skip empty mappings
+                    continue
                 if comb not in reverse_map:
                     reverse_map[comb] = []
                 reverse_map[comb].append(orig)
@@ -453,8 +475,6 @@ async def get_client_campaign(
             for cat in categories:
                 if cat in reverse_map:
                     orig_names.extend(reverse_map[cat])
-                else:
-                    orig_names.append(cat)
             
             if orig_names:
                 p_idx_f += 1
