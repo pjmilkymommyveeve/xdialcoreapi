@@ -318,65 +318,7 @@ async def get_client_campaign(
             start_date = today.strftime('%Y-%m-%d')
             end_date = today.strftime('%Y-%m-%d')
         
-        # Build base query with filters (WITHOUT category filter for counting all categories)
-        where_clauses_without_category = ["c.client_campaign_model_id = $1"]
-        params_without_category = [campaign_id]
-        param_count_without_category = 1
-        
-        if search:
-            param_count_without_category += 1
-            where_clauses_without_category.append(f"(c.number ILIKE ${param_count_without_category} OR rc.name ILIKE ${param_count_without_category})")
-            params_without_category.append(f"%{search}%")
-        
-        if list_id:
-            param_count_without_category += 1
-            where_clauses_without_category.append(f"c.list_id ILIKE ${param_count_without_category}")
-            params_without_category.append(f"%{list_id}%")
-        
-        # Parse and store datetime objects for reuse
-        start_dt = None
-        end_dt = None
-        
-        if start_date:
-            try:
-                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-                if start_time:
-                    time_obj = datetime.strptime(start_time, '%H:%M').time()
-                    start_dt = datetime.combine(start_dt.date(), time_obj)
-                param_count_without_category += 1
-                where_clauses_without_category.append(f"c.timestamp >= ${param_count_without_category}")
-                params_without_category.append(start_dt)
-            except ValueError:
-                pass
-        
-        if end_date:
-            try:
-                end_dt = datetime.strptime(end_date, '%Y-%m-%d')
-                if end_time:
-                    time_obj = datetime.strptime(end_time, '%H:%M').time()
-                    end_dt = datetime.combine(end_dt.date(), time_obj)
-                else:
-                    end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
-                param_count_without_category += 1
-                where_clauses_without_category.append(f"c.timestamp <= ${param_count_without_category}")
-                params_without_category.append(end_dt)
-            except ValueError:
-                pass
-        
-        # Fetch all calls WITHOUT category filter for complete category counts
-        calls_query_all = f"""
-            SELECT c.id, c.number, c.list_id, c.timestamp, c.stage, c.transferred,
-                   c.transcription, rc.name as category_name, rc.color as category_color,
-                   v.name as voice_name
-            FROM calls c
-            LEFT JOIN response_categories rc ON c.response_category_id = rc.id
-            LEFT JOIN voices v ON c.voice_id = v.id
-            WHERE {' AND '.join(where_clauses_without_category)}
-            ORDER BY c.number, c.timestamp, c.stage
-        """
-        all_calls_for_categories = await conn.fetch(calls_query_all, *params_without_category)
-        
-        # Build query with filters (WITH category filter for pagination)
+        # Build query with filters
         where_clauses = ["c.client_campaign_model_id = $1"]
         params = [campaign_id]
         param_count = 1
@@ -391,15 +333,31 @@ async def get_client_campaign(
             where_clauses.append(f"c.list_id ILIKE ${param_count}")
             params.append(f"%{list_id}%")
         
-        if start_dt:
-            param_count += 1
-            where_clauses.append(f"c.timestamp >= ${param_count}")
-            params.append(start_dt)
+        if start_date:
+            try:
+                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                if start_time:
+                    time_obj = datetime.strptime(start_time, '%H:%M').time()
+                    start_dt = datetime.combine(start_dt.date(), time_obj)
+                param_count += 1
+                where_clauses.append(f"c.timestamp >= ${param_count}")
+                params.append(start_dt)
+            except ValueError:
+                pass
         
-        if end_dt:
-            param_count += 1
-            where_clauses.append(f"c.timestamp <= ${param_count}")
-            params.append(end_dt)
+        if end_date:
+            try:
+                end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+                if end_time:
+                    time_obj = datetime.strptime(end_time, '%H:%M').time()
+                    end_dt = datetime.combine(end_dt.date(), time_obj)
+                else:
+                    end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
+                param_count += 1
+                where_clauses.append(f"c.timestamp <= ${param_count}")
+                params.append(end_dt)
+            except ValueError:
+                pass
         
         if categories:
             reverse_mapping = {}
@@ -466,16 +424,8 @@ async def get_client_campaign(
             if original_name in CLIENT_CATEGORY_MAPPING and CLIENT_CATEGORY_MAPPING[original_name] != "":
                 mapped_categories.append(db_cat)
         
-        # Use all_calls_for_categories (without category filter) for complete counts
-        calls_list_for_categories = [dict(call) for call in all_calls_for_categories]
-        call_sessions_for_categories = group_calls_by_session(calls_list_for_categories, duration_minutes=2)
-        latest_calls_for_categories = []
-        for session in call_sessions_for_categories:
-            session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
-            latest_calls_for_categories.append(session_sorted[-1])
-        
         category_counts_raw = {}
-        for call in latest_calls_for_categories:
+        for call in latest_calls:
             if call['category_name']:
                 cat_name = call['category_name']
                 # Only count if in mapping and not empty string
@@ -571,6 +521,7 @@ async def get_client_campaign(
                 has_prev=page > 1
             )
         )
+
 
 # ============== ADMIN ENDPOINT ==============
 
