@@ -178,6 +178,22 @@ class CategoryTimeSeriesResponse(BaseModel):
 
 # ============== HELPER FUNCTIONS ==============
 
+def resolve_client_category(original_category: str, call_data: dict) -> str:
+    """
+    Dynamically resolve category based on call properties.
+    All conditional category mapping logic lives here.
+    """
+    # Rule 1: "already" becomes "Neutral" when transferred
+    if original_category == "already" and call_data.get('transferred'):
+        return "Neutral"
+    
+    # Rule 2: "busy" becomes "Neutral" when transferred
+    if original_category == "busy" and call_data.get('transferred'):
+        return "Neutral"
+    
+    # Default: use the static mapping
+    return CLIENT_CATEGORY_MAPPING.get(original_category, original_category)
+
 def group_calls_by_session(calls: List[dict], duration_minutes: int = 2) -> List[List[dict]]:
     """
     Group calls by number and timestamp proximity.
@@ -438,16 +454,20 @@ async def get_client_campaign(
                 mapped_categories.append(db_cat)
         
         category_counts_raw = {}
-        for call in base_latest_calls:  # Use base_latest_calls for counting
+        for call in base_latest_calls:
             if call['category_name']:
                 cat_name = call['category_name']
-                if cat_name in CLIENT_CATEGORY_MAPPING and CLIENT_CATEGORY_MAPPING[cat_name] != "":
+                # Use the resolver function
+                resolved_category = resolve_client_category(cat_name, call)
+                
+                if resolved_category != "":  # Skip empty mappings
                     if cat_name not in category_counts_raw:
                         category_counts_raw[cat_name] = {
                             'name': cat_name,
                             'color': call['category_color'] or '#6B7280',
                             'count': 0,
-                            'transferred_count': 0
+                            'transferred_count': 0,
+                            'resolved_category': resolved_category
                         }
                     category_counts_raw[cat_name]['count'] += 1
                     if call.get('transferred'):
@@ -459,7 +479,8 @@ async def get_client_campaign(
         
         for db_cat in mapped_categories:
             original_name = db_cat['name'] or 'UNKNOWN'
-            combined_name = CLIENT_CATEGORY_MAPPING[original_name]
+            # Use resolver to get the actual combined name
+            combined_name = resolve_client_category(original_name, {})  # Empty dict for static mapping
             
             if combined_name not in combined_counts:
                 combined_counts[combined_name] = 0
@@ -467,12 +488,11 @@ async def get_client_campaign(
                 category_colors[combined_name] = db_cat['color'] or '#6B7280'
         
         for cat_data in category_counts_raw.values():
-            original_name = cat_data['name']
-            combined_name = CLIENT_CATEGORY_MAPPING[original_name]
-            combined_counts[combined_name] += cat_data['count']
-            combined_transferred_counts[combined_name] += cat_data['transferred_count']
-            if not category_colors.get(combined_name):
-                category_colors[combined_name] = cat_data['color']
+            resolved_name = cat_data['resolved_category']
+            combined_counts[resolved_name] += cat_data['count']
+            combined_transferred_counts[resolved_name] += cat_data['transferred_count']
+            if not category_colors.get(resolved_name):
+                category_colors[resolved_name] = cat_data['color']
         
         all_categories = []
         for combined_name in sorted(combined_counts.keys()):
@@ -487,7 +507,8 @@ async def get_client_campaign(
         calls_data = []
         for call in paginated_calls:
             original_category = call['category_name'] or 'Unknown'
-            combined_category = CLIENT_CATEGORY_MAPPING.get(original_category, original_category)
+            # Use the resolver function with full call data
+            combined_category = resolve_client_category(original_category, call)
             
             calls_data.append(CallRecord(
                 id=call['id'],
@@ -532,7 +553,7 @@ async def get_client_campaign(
                 has_prev=page > 1
             )
         )
-
+    
 # ============== ADMIN ENDPOINT ==============
 
 @router.get("/admin/{campaign_id}/dashboard", response_model=AdminCampaignDashboardResponse)

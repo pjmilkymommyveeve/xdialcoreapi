@@ -25,7 +25,7 @@ CATEGORY_MAPPING = {
     "unknown": "Unclear Response",
 
     "busy": "Busy",
-    "already": "Not Interested",
+    "already": "Already",
     "notinterested": "Not Interested",
     "rebuttal": "Not Interested",
     "donttransfer": "Not Interested",
@@ -70,6 +70,23 @@ class ExportRequest(BaseModel):
 
 
 # ============== HELPER FUNCTIONS ==============
+
+def resolve_export_category(original_category: str, call_data: dict) -> str:
+    """
+    Dynamically resolve category based on call properties.
+    All conditional category mapping logic lives here.
+    """
+    # Rule 1: "already" becomes "Neutral" when transferred
+    if original_category == "already" and call_data.get('transferred'):
+        return "Neutral"
+    
+    # Rule 2: "busy" becomes "Neutral" when transferred
+    if original_category == "busy" and call_data.get('transferred'):
+        return "Neutral"
+    
+    # Default: use the static mapping
+    return CATEGORY_MAPPING.get(original_category, original_category)
+
 def group_calls_by_session(calls: List[dict]) -> List[dict]:
     """
     Group calls by number and 2-minute sessions, returning latest stage per session.
@@ -263,9 +280,10 @@ async def get_export_options(
             except ValueError:
                 pass
         
-        # Get filtered calls
+        # Get filtered calls - CHANGED: Added transferred field
         filtered_calls_query = f"""
-            SELECT c.number, c.stage, c.timestamp, rc.name as category_name, rc.color as category_color
+            SELECT c.number, c.stage, c.timestamp, c.transferred,
+                   rc.name as category_name, rc.color as category_color
             FROM calls c
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             WHERE {' AND '.join(where_clauses)}
@@ -290,18 +308,22 @@ async def get_export_options(
             if original_name in CATEGORY_MAPPING:
                 mapped_categories.append(db_cat)
         
-        # Count categories from filtered calls
+        # Count categories from filtered calls - CHANGED: Use resolver
         category_counts_raw = {}
         for call in latest_stage_calls:
             if call['category_name']:
                 cat_name = call['category_name']
+                # Use the resolver function
+                resolved_category = resolve_export_category(cat_name, call)
+                
                 # Only count if in mapping
-                if cat_name in CATEGORY_MAPPING:
+                if resolved_category != "":
                     if cat_name not in category_counts_raw:
                         category_counts_raw[cat_name] = {
                             'name': cat_name,
                             'color': call['category_color'] or '#6B7280',
-                            'count': 0
+                            'count': 0,
+                            'resolved_category': resolved_category
                         }
                     category_counts_raw[cat_name]['count'] += 1
         
@@ -309,22 +331,21 @@ async def get_export_options(
         combined_counts = {}
         category_colors = {}
         
-        # Initialize all mapped categories with 0 counts
+        # Initialize all mapped categories with 0 counts - CHANGED: Use resolver
         for db_cat in mapped_categories:
             original_name = db_cat['name'] or 'UNKNOWN'
-            combined_name = CATEGORY_MAPPING[original_name]
+            combined_name = resolve_export_category(original_name, {})  # Empty dict for static mapping
             
             if combined_name not in combined_counts:
                 combined_counts[combined_name] = 0
                 category_colors[combined_name] = db_cat['color'] or '#6B7280'
         
-        # Add actual counts from filtered calls
+        # Add actual counts from filtered calls - CHANGED: Use resolved category
         for cat_data in category_counts_raw.values():
-            original_name = cat_data['name']
-            combined_name = CATEGORY_MAPPING[original_name]
-            combined_counts[combined_name] += cat_data['count']
-            if not category_colors.get(combined_name):
-                category_colors[combined_name] = cat_data['color']
+            resolved_name = cat_data['resolved_category']
+            combined_counts[resolved_name] += cat_data['count']
+            if not category_colors.get(resolved_name):
+                category_colors[resolved_name] = cat_data['color']
         
         # Build categories list
         all_categories = []
@@ -446,10 +467,10 @@ async def download_export(
         # Group by 2-minute sessions and get latest stage per session
         filtered_calls = group_calls_by_session(calls_list)
         
-        # Filter out categories not in mapping
+        # Filter out categories not in mapping - CHANGED: Use resolver
         filtered_calls = [
             call for call in filtered_calls 
-            if not call['category_name'] or call['category_name'] in CATEGORY_MAPPING
+            if not call['category_name'] or resolve_export_category(call['category_name'], call) != ""
         ]
         
         # Sort by timestamp descending for export
@@ -463,9 +484,10 @@ async def download_export(
             'Transferred', 'Stage'
         ])
         
+        # CHANGED: Use resolver when writing to CSV
         for call in filtered_calls:
             original_category = call['category_name'] or 'Unknown'
-            combined_category = CATEGORY_MAPPING.get(original_category, original_category)
+            combined_category = resolve_export_category(original_category, call)
             
             writer.writerow([
                 call['id'],
