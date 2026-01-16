@@ -317,14 +317,14 @@ async def submit_integration_request(request: IntegrationRequest):
                     status_row = await conn.fetchrow(status_insert_query)
                     status_id = status_row['id']
                 
-                # 11. create client campaign model (removed status_history_id and non-existent fields)
+                # 11. create client campaign model (removed is_active)
                 ccm_insert_query = """
                     INSERT INTO client_campaign_model
                     (client_id, campaign_model_id, selected_transfer_setting_id, 
                      start_date, end_date, is_custom, custom_comments, current_remote_agents, 
-                     is_active, dialer_settings_id, bot_count, 
+                     dialer_settings_id, bot_count, 
                      long_call_scripts_active, disposition_set)
-                    VALUES ($1, $2, $3, $4, NULL, false, $5, '', false, $6, $7, false, false)
+                    VALUES ($1, $2, $3, $4, NULL, false, $5, '', $6, $7, false, false)
                     RETURNING id
                 """
                 ccm_row = await conn.fetchrow(
@@ -513,14 +513,14 @@ async def add_campaign_to_client(
                     status_row = await conn.fetchrow(status_insert_query)
                     status_id = status_row['id']
                 
-                # create client campaign model
+                # create client campaign model (removed is_active)
                 ccm_insert_query = """
                     INSERT INTO client_campaign_model
                     (client_id, campaign_model_id, selected_transfer_setting_id, 
                      start_date, end_date, is_custom, custom_comments, current_remote_agents, 
-                     is_active, dialer_settings_id, bot_count, 
+                     dialer_settings_id, bot_count, 
                      long_call_scripts_active, disposition_set)
-                    VALUES ($1, $2, $3, $4, NULL, false, $5, '', false, $6, $7, false, false)
+                    VALUES ($1, $2, $3, $4, NULL, false, $5, '', $6, $7, false, false)
                     RETURNING id
                 """
                 ccm_row = await conn.fetchrow(
