@@ -22,7 +22,7 @@ CLIENT_CATEGORY_MAPPING = {
 
     "unknown": "Unclear Response",
 
-    "busy": "Busy",
+    "busy": "Call Back",
     "already": "Already",
     "notinterested": "Not Interested",
     "rebuttal": "Not Interested",
