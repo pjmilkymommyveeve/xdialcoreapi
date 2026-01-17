@@ -6,7 +6,7 @@ from core.dependencies import require_roles
 from database.db import get_db
 
 
-router = APIRouter(prefix="/client/campaigns", tags=["Client Campaigns"])
+router = APIRouter(prefix="/client/campaigns", tags=["Client"])
 
 
 # ============== MODELS ==============
