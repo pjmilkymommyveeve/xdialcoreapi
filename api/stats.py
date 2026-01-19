@@ -9,7 +9,7 @@ from core.dependencies import require_roles
 from database.db import get_db
 
 
-router = APIRouter(prefix="/campaigns/stats", tags=["Campaign Statistics"])
+router = APIRouter(prefix="/campaigns/stats", tags=["General Statistics"])
 
 
 # ============== MODELS ==============

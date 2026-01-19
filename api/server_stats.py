@@ -436,3 +436,47 @@ async def get_campaign_server_distribution(
             campaigns=campaigns_list
         )
 
+@router.get("/servers-with-zero-bots", response_model=List[ServerStats])
+async def get_servers_with_zero_bots(
+    user_info: Dict = Depends(require_roles(["admin", "onboarding", "qa"]))
+):
+    """
+    ADMIN: GET SERVERS WITH ZERO BOTS ASSIGNED
+    
+    This endpoint retrieves a list of servers that currently have zero bots assigned to them.
+    It provides basic server information including server ID, IP address, alias, and domain.
+    """
+    pool = await get_db()
+    
+    async with pool.acquire() as conn:
+        query = """
+            SELECT 
+                s.id as server_id,  
+                s.ip as server_ip,
+                s.alias as server_alias,
+                s.domain as server_domain
+            FROM servers s
+            LEFT JOIN server_campaign_bots scb ON s.id = scb.server_id
+            GROUP BY s.id
+            HAVING COALESCE(SUM(scb.bot_count), 0) = 0
+            ORDER BY s.id
+        """
+        
+        rows = await conn.fetch(query)
+        
+        servers_list = [
+            ServerStats(
+                server_id=row['server_id'],
+                server_ip=row['server_ip'],
+                server_alias=row['server_alias'],
+                server_domain=row['server_domain'],
+                total_campaigns=0,
+                active_campaigns=0,
+                total_bots=0,
+                active_bots=0,
+                campaigns=[]
+            )
+            for row in rows
+        ]
+        
+        return servers_list

@@ -5,7 +5,7 @@ from core.settings import settings
 from database.db import init_db_pool, close_db_pool
 
 # import routers
-from api import auth, campaigns, export, integration, recordings, stats, client, client_employees, server_stats
+from api import auth, campaigns, export, integration, recordings, stats, client, client_employees, server_stats, campaign_stats
 
 
 @asynccontextmanager
@@ -45,6 +45,7 @@ app.include_router(export.router, prefix=settings.app.api_prefix)
 app.include_router(integration.router, prefix=settings.app.api_prefix)
 app.include_router(stats.router, prefix=settings.app.api_prefix)
 app.include_router(server_stats.router, prefix=settings.app.api_prefix)
+app.include_router(campaign_stats.router, prefix=settings.app.api_prefix)
 
 
 @app.get("/")
