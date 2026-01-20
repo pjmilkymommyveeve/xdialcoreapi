@@ -35,7 +35,7 @@ CATEGORY_MAPPING = {
 
     "neutral": "Neutral",
 
-    "inaudible": "DAIR",
+    "inaudible": "Inaudible",
     "notresponding" : "DAIR",
     "usersilent": "User Silent",
     "userhangup": "User Hangup",
