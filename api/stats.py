@@ -5,9 +5,9 @@ from typing import List, Optional, Dict
 from datetime import datetime, time, timedelta
 import csv
 import io
+
 from core.dependencies import require_roles
 from database.db import get_db
-
 from utils.call import group_calls_by_session
 
 router = APIRouter(prefix="/campaigns/stats", tags=["General Statistics"])
@@ -32,6 +32,8 @@ class CampaignTransferStats(BaseModel):
     transferred_calls: int
     transfer_rate: float
     non_transferred_calls: int
+    null_voice_calls: int
+    null_voice_ratio: float
     voice_stats: List[VoiceTransferStats]
 
 class AllCampaignsTransferResponse(BaseModel):
@@ -53,6 +55,8 @@ class OverallVoiceStatsResponse(BaseModel):
     total_calls: int
     total_transferred: int
     overall_transfer_rate: float
+    null_voice_calls: int
+    null_voice_ratio: float
     voice_stats: List[VoiceOverallStats]
 
 class CallStageData(BaseModel):
@@ -84,7 +88,6 @@ class CallLookupResponse(BaseModel):
 
 # ============== HELPER FUNCTIONS ==============
 
-
 async def check_campaign_is_active(conn, campaign_id: int) -> bool:
     """Check if campaign had any calls in the last 1 minute"""
     one_minute_ago = datetime.now() - timedelta(minutes=1)
@@ -96,6 +99,7 @@ async def check_campaign_is_active(conn, campaign_id: int) -> bool:
             AND timestamp >= $2
         ) as is_active
     """
+    
     result = await conn.fetchrow(query, campaign_id, one_minute_ago)
     return result['is_active'] if result else False
 
@@ -104,6 +108,12 @@ def calculate_transfer_rate(transferred: int, total: int) -> float:
     if total == 0:
         return 0.0
     return round((transferred / total) * 100, 2)
+
+def calculate_null_voice_ratio(null_count: int, total: int) -> float:
+    """Calculate null voice ratio as percentage"""
+    if total == 0:
+        return 0.0
+    return round((null_count / total) * 100, 2)
 
 async def build_date_filter(start_date: str, end_date: str, start_time: str, end_time: str):
     """Build date/time filter parameters"""
@@ -117,6 +127,7 @@ async def build_date_filter(start_date: str, end_date: str, start_time: str, end
             if start_time:
                 time_obj = datetime.strptime(start_time, '%H:%M').time()
                 start_dt = datetime.combine(start_dt.date(), time_obj)
+            
             param_count += 1
             where_clauses.append(f"c.timestamp >= ${param_count}")
             params.append(start_dt)
@@ -131,6 +142,7 @@ async def build_date_filter(start_date: str, end_date: str, start_time: str, end
                 end_dt = datetime.combine(end_dt.date(), time_obj)
             else:
                 end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
+            
             param_count += 1
             where_clauses.append(f"c.timestamp <= ${param_count}")
             params.append(end_dt)
@@ -167,8 +179,8 @@ def parse_csv_numbers(content: bytes) -> List[str]:
         )
 
 async def fetch_call_data(
-    numbers: List[str], 
-    conn, 
+    numbers: List[str],
+    conn,
     client_id: Optional[int] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None
@@ -297,7 +309,7 @@ async def fetch_call_data(
     return results, not_found
 
 def generate_csv_output(
-    results: List[CallLookupResult], 
+    results: List[CallLookupResult],
     not_found: List[str],
     filters: Dict[str, Optional[str]]
 ) -> str:
@@ -375,12 +387,16 @@ async def get_all_campaigns_transfer_stats(
     - Voice-level breakdown of transfers (based on final/latest stage)
     - Transfer rates per voice
     - Overall campaign transfer stats
+    - Null voice count and ratio
     
-    All statistics are based on the FINAL STAGE of each call session (last stage per number within 2-minute windows).
+    All statistics are based on the FINAL STAGE of each call session 
+    (last stage per number within 2-minute windows).
+    
     Only includes campaigns that are not Archived.
+    
+    Voices with NULL values are shown separately and not included in voice statistics.
     """
     pool = await get_db()
-    
     async with pool.acquire() as conn:
         # Build campaign filter - exclude archived campaigns
         campaign_filter = """
@@ -392,28 +408,32 @@ async def get_all_campaigns_transfer_stats(
                 AND s.status_name != 'Archived'
             )
         """
-        campaign_params = []
         
+        campaign_params = []
         if client_id:
             campaign_filter += " AND ccm.client_id = $1"
             campaign_params = [client_id]
         
         # Get all campaigns
         campaigns_query = f"""
-            SELECT ccm.id, ccm.client_id, cl.name as client_name,
-                   ca.name as campaign_name, m.name as model_name,
-                   s.status_name as current_status
+            SELECT 
+                ccm.id,
+                ccm.client_id,
+                cl.name as client_name,
+                ca.name as campaign_name,
+                m.name as model_name,
+                s.status_name as current_status
             FROM client_campaign_model ccm
             JOIN clients cl ON ccm.client_id = cl.client_id
             JOIN campaign_model cm ON ccm.campaign_model_id = cm.id
             JOIN campaigns ca ON cm.campaign_id = ca.id
             JOIN models m ON cm.model_id = m.id
-            LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id 
-                AND sh.end_date IS NULL
+            LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id AND sh.end_date IS NULL
             LEFT JOIN status s ON sh.status_id = s.id
             WHERE {campaign_filter}
             ORDER BY cl.name, ca.name, m.name
         """
+        
         campaigns = await conn.fetch(campaigns_query, *campaign_params)
         
         if not campaigns:
@@ -459,6 +479,7 @@ async def get_all_campaigns_transfer_stats(
                 WHERE {base_where_clause}
                 ORDER BY c.number, c.timestamp, c.stage
             """
+            
             all_calls = await conn.fetch(all_calls_query, *params)
             
             if not all_calls:
@@ -476,13 +497,17 @@ async def get_all_campaigns_transfer_stats(
                 session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
                 final_calls.append(session_sorted[-1])
             
-            # Aggregate by voice
-            voice_data = {}
-            total_calls = len(final_calls)
-            total_transferred = 0
+            # Separate null voice calls from voiced calls
+            null_voice_calls = [call for call in final_calls if call['voice_name'] is None]
+            voiced_calls = [call for call in final_calls if call['voice_name'] is not None]
             
-            for call in final_calls:
-                voice_name = call['voice_name'] or 'Unknown'
+            # Aggregate by voice (only for non-null voices)
+            voice_data = {}
+            total_voiced_calls = len(voiced_calls)
+            total_voiced_transferred = 0
+            
+            for call in voiced_calls:
+                voice_name = call['voice_name']
                 transferred = call['transferred'] or False
                 
                 if voice_name not in voice_data:
@@ -494,9 +519,9 @@ async def get_all_campaigns_transfer_stats(
                 voice_data[voice_name]['total'] += 1
                 if transferred:
                     voice_data[voice_name]['transferred'] += 1
-                    total_transferred += 1
+                    total_voiced_transferred += 1
             
-            # Build voice stats list
+            # Build voice stats list (only for non-null voices)
             voice_stats = []
             for voice_name in sorted(voice_data.keys()):
                 data = voice_data[voice_name]
@@ -508,6 +533,10 @@ async def get_all_campaigns_transfer_stats(
                     non_transferred_calls=data['total'] - data['transferred']
                 ))
             
+            # Calculate overall stats (including null voice calls for total count)
+            total_all_calls = len(final_calls)
+            null_voice_count = len(null_voice_calls)
+            
             # Add campaign stats
             campaign_stats_list.append(CampaignTransferStats(
                 campaign_id=campaign['id'],
@@ -516,10 +545,12 @@ async def get_all_campaigns_transfer_stats(
                 client_name=campaign['client_name'],
                 is_active=is_active,
                 current_status=campaign['current_status'],
-                total_calls=total_calls,
-                transferred_calls=total_transferred,
-                transfer_rate=calculate_transfer_rate(total_transferred, total_calls),
-                non_transferred_calls=total_calls - total_transferred,
+                total_calls=total_voiced_calls,
+                transferred_calls=total_voiced_transferred,
+                transfer_rate=calculate_transfer_rate(total_voiced_transferred, total_voiced_calls),
+                non_transferred_calls=total_voiced_calls - total_voiced_transferred,
+                null_voice_calls=null_voice_count,
+                null_voice_ratio=calculate_null_voice_ratio(null_voice_count, total_all_calls),
                 voice_stats=voice_stats
             ))
         
@@ -547,13 +578,18 @@ async def get_overall_voice_stats(
     - Transferred calls per voice
     - Transfer rate per voice
     - Non-transferred calls per voice
+    - Null voice count and ratio
     
-    All statistics are based on the FINAL STAGE of each call session (last stage per number within 2-minute windows).
+    All statistics are based on the FINAL STAGE of each call session 
+    (last stage per number within 2-minute windows).
+    
     Aggregates data across all campaigns to show overall voice performance.
+    
     Only includes campaigns that are not Archived.
+    
+    Voices with NULL values are shown separately and not included in voice statistics.
     """
     pool = await get_db()
-    
     async with pool.acquire() as conn:
         # Build campaign filter - exclude archived campaigns
         campaign_filter = """
@@ -565,8 +601,8 @@ async def get_overall_voice_stats(
                 AND s.status_name != 'Archived'
             )
         """
-        campaign_params = []
         
+        campaign_params = []
         if client_id:
             campaign_filter += " AND ccm.client_id = $1"
             campaign_params = [client_id]
@@ -577,6 +613,7 @@ async def get_overall_voice_stats(
             FROM client_campaign_model ccm
             WHERE {campaign_filter}
         """
+        
         campaign_ids_result = await conn.fetch(campaigns_query, *campaign_params)
         campaign_ids = [row['id'] for row in campaign_ids_result]
         
@@ -587,6 +624,8 @@ async def get_overall_voice_stats(
                 total_calls=0,
                 total_transferred=0,
                 overall_transfer_rate=0.0,
+                null_voice_calls=0,
+                null_voice_ratio=0.0,
                 voice_stats=[]
             )
         
@@ -617,6 +656,7 @@ async def get_overall_voice_stats(
             WHERE {where_clause}
             ORDER BY c.client_campaign_model_id, c.number, c.timestamp, c.stage
         """
+        
         all_calls = await conn.fetch(all_calls_query, *params)
         
         if not all_calls:
@@ -626,6 +666,8 @@ async def get_overall_voice_stats(
                 total_calls=0,
                 total_transferred=0,
                 overall_transfer_rate=0.0,
+                null_voice_calls=0,
+                null_voice_ratio=0.0,
                 voice_stats=[]
             )
         
@@ -649,13 +691,17 @@ async def get_overall_voice_stats(
                 session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
                 all_final_calls.append(session_sorted[-1])
         
-        # Aggregate by voice across all campaigns
-        voice_data = {}
-        total_calls = len(all_final_calls)
-        total_transferred = 0
+        # Separate null voice calls from voiced calls
+        null_voice_calls = [call for call in all_final_calls if call['voice_name'] is None]
+        voiced_calls = [call for call in all_final_calls if call['voice_name'] is not None]
         
-        for call in all_final_calls:
-            voice_name = call['voice_name'] or 'Unknown'
+        # Aggregate by voice across all campaigns (only for non-null voices)
+        voice_data = {}
+        total_voiced_calls = len(voiced_calls)
+        total_voiced_transferred = 0
+        
+        for call in voiced_calls:
+            voice_name = call['voice_name']
             transferred = call['transferred'] or False
             
             if voice_name not in voice_data:
@@ -667,9 +713,9 @@ async def get_overall_voice_stats(
             voice_data[voice_name]['total'] += 1
             if transferred:
                 voice_data[voice_name]['transferred'] += 1
-                total_transferred += 1
+                total_voiced_transferred += 1
         
-        # Build voice stats list
+        # Build voice stats list (only for non-null voices)
         voice_stats = []
         for voice_name in sorted(voice_data.keys()):
             data = voice_data[voice_name]
@@ -681,12 +727,18 @@ async def get_overall_voice_stats(
                 non_transferred_final_calls=data['total'] - data['transferred']
             ))
         
+        # Calculate overall stats
+        total_all_calls = len(all_final_calls)
+        null_voice_count = len(null_voice_calls)
+        
         return OverallVoiceStatsResponse(
             start_date=start_date or None,
             end_date=end_date or None,
-            total_calls=total_calls,
-            total_transferred=total_transferred,
-            overall_transfer_rate=calculate_transfer_rate(total_transferred, total_calls),
+            total_calls=total_voiced_calls,
+            total_transferred=total_voiced_transferred,
+            overall_transfer_rate=calculate_transfer_rate(total_voiced_transferred, total_voiced_calls),
+            null_voice_calls=null_voice_count,
+            null_voice_ratio=calculate_null_voice_ratio(null_voice_count, total_all_calls),
             voice_stats=voice_stats
         )
 
@@ -737,8 +789,8 @@ async def lookup_calls_json(
     pool = await get_db()
     async with pool.acquire() as conn:
         results, not_found = await fetch_call_data(
-            numbers, 
-            conn, 
+            numbers,
+            conn,
             client_id=client_id,
             start_date=start_date,
             end_date=end_date
@@ -778,11 +830,10 @@ async def lookup_calls_csv(
     - Transfer status at each stage
     - Final response category and decision
     
-    Optional Filters:
-    - client_id: Filter calls by specific client
+    Optional Filters:- client_id: Filter calls by specific client
     - start_date: Filter calls from this date onwards (YYYY-MM-DD)
     - end_date: Filter calls up to this date (YYYY-MM-DD)
-    
+
     Response format: CSV file download
     """
     # Validate file type
@@ -791,23 +842,23 @@ async def lookup_calls_csv(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="File must be a CSV file"
         )
-    
+
     # Read and parse CSV
     content = await file.read()
     numbers = parse_csv_numbers(content)
-    
+
     if not numbers:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No valid phone numbers found in CSV file"
         )
-    
+
     # Fetch call data with filters
     pool = await get_db()
     async with pool.acquire() as conn:
         results, not_found = await fetch_call_data(
-            numbers, 
-            conn, 
+            numbers,
+            conn,
             client_id=client_id,
             start_date=start_date,
             end_date=end_date
