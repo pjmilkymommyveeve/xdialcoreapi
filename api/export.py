@@ -19,13 +19,13 @@ CATEGORY_MAPPING = {
     "answermachine": "Answering Machine",
 
     "dnc": "DNC",
-    "dnq": "Do Not Qualify",
+    "dnq": "DNQ",
     "honeypot": "Honeypot",
 
     "unknown": "Unclear Response",
 
     "busy": "Call Back",
-    "already": "Already",
+    "already": "Not Interested",
     "notinterested": "Not Interested",
     "rebuttal": "Not Interested",
     "donttransfer": "Not Interested",
@@ -40,6 +40,7 @@ CATEGORY_MAPPING = {
     "usersilent": "User Silent",
     "userhangup": "User Hangup",
 }
+
 
 # ============== MODELS ==============
 

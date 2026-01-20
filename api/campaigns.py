@@ -17,13 +17,13 @@ CLIENT_CATEGORY_MAPPING = {
     "answermachine": "Answering Machine",
 
     "dnc": "DNC",
-    "dnq": "Do Not Qualify",
+    "dnq": "DNQ",
     "honeypot": "Honeypot",
 
     "unknown": "Unclear Response",
 
     "busy": "Call Back",
-    "already": "Already",
+    "already": "Not Interested",
     "notinterested": "Not Interested",
     "rebuttal": "Not Interested",
     "donttransfer": "Not Interested",
@@ -638,20 +638,20 @@ async def get_admin_campaign_dashboard(
             start_date = today.strftime('%Y-%m-%d')
             end_date = today.strftime('%Y-%m-%d')
         
-        # Build base query (without category filters - we'll filter in Python for efficiency)
-        where_clauses = ["c.client_campaign_model_id = $1"]
-        params = [campaign_id]
-        param_count = 1
+        # Build base query WITHOUT category filters for counting all categories
+        base_where_clauses = ["c.client_campaign_model_id = $1"]
+        base_params = [campaign_id]
+        base_param_count = 1
         
         if search:
-            param_count += 1
-            where_clauses.append(f"(c.number ILIKE ${param_count} OR rc.name ILIKE ${param_count})")
-            params.append(f"%{search}%")
+            base_param_count += 1
+            base_where_clauses.append(f"(c.number ILIKE ${base_param_count} OR rc.name ILIKE ${base_param_count})")
+            base_params.append(f"%{search}%")
         
         if list_id:
-            param_count += 1
-            where_clauses.append(f"c.list_id ILIKE ${param_count}")
-            params.append(f"%{list_id}%")
+            base_param_count += 1
+            base_where_clauses.append(f"c.list_id ILIKE ${base_param_count}")
+            base_params.append(f"%{list_id}%")
         
         if start_date:
             try:
@@ -659,9 +659,9 @@ async def get_admin_campaign_dashboard(
                 if start_time:
                     time_obj = datetime.strptime(start_time, '%H:%M').time()
                     start_dt = datetime.combine(start_dt.date(), time_obj)
-                param_count += 1
-                where_clauses.append(f"c.timestamp >= ${param_count}")
-                params.append(start_dt)
+                base_param_count += 1
+                base_where_clauses.append(f"c.timestamp >= ${base_param_count}")
+                base_params.append(start_dt)
             except ValueError:
                 pass
         
@@ -673,13 +673,64 @@ async def get_admin_campaign_dashboard(
                     end_dt = datetime.combine(end_dt.date(), time_obj)
                 else:
                     end_dt = datetime.combine(end_dt.date(), time(23, 59, 59))
-                param_count += 1
-                where_clauses.append(f"c.timestamp <= ${param_count}")
-                params.append(end_dt)
+                base_param_count += 1
+                base_where_clauses.append(f"c.timestamp <= ${base_param_count}")
+                base_params.append(end_dt)
             except ValueError:
                 pass
         
-        # Fetch all calls (no category filter in SQL for better performance with stage filters)
+        # Query for category counts (without category filter)
+        base_calls_query = f"""
+            SELECT c.id, c.number, c.list_id, c.timestamp, c.stage, c.transferred,
+                   c.transcription, rc.name as category_name, rc.color as category_color,
+                   v.name as voice_name
+            FROM calls c
+            LEFT JOIN response_categories rc ON c.response_category_id = rc.id
+            LEFT JOIN voices v ON c.voice_id = v.id
+            WHERE {' AND '.join(base_where_clauses)}
+            ORDER BY c.number, c.timestamp, c.stage
+        """
+        base_calls = await conn.fetch(base_calls_query, *base_params)
+        base_calls_list = [dict(call) for call in base_calls]
+        base_call_sessions = group_calls_by_session(base_calls_list, duration_minutes=2)
+        
+        # Get latest calls from base sessions for category counting
+        base_latest_calls = []
+        for session in base_call_sessions:
+            session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
+            base_latest_calls.append(session_sorted[-1])
+        
+        # Build reverse mapping for ADMIN categories
+        reverse_mapping = {}
+        for orig, combined in ADMIN_CATEGORY_MAPPING.items():
+            if combined not in reverse_mapping:
+                reverse_mapping[combined] = []
+            reverse_mapping[combined].append(orig)
+        
+        # Now build filtered query WITH category filters
+        where_clauses = base_where_clauses.copy()
+        params = base_params.copy()
+        param_count = base_param_count
+        
+        # Handle stage_filters - need to use Python filtering for this complex case
+        use_python_filtering = bool(parsed_stage_filters)
+        
+        # Handle legacy categories filter (only if no stage_filters)
+        if categories and not parsed_stage_filters:
+            # Convert combined category names to original names
+            original_names = []
+            for cat in categories:
+                if cat in reverse_mapping:
+                    original_names.extend(reverse_mapping[cat])
+                else:
+                    original_names.append(cat)
+            
+            if original_names:
+                param_count += 1
+                where_clauses.append(f"rc.name = ANY(${param_count})")
+                params.append(original_names)
+        
+        # Fetch calls with or without category filter
         calls_query = f"""
             SELECT c.id, c.number, c.list_id, c.timestamp, c.stage, c.transferred,
                    c.transcription, rc.name as category_name, rc.color as category_color,
@@ -698,16 +749,9 @@ async def get_admin_campaign_dashboard(
         # Group calls into sessions (2-minute window)
         call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
         
-        # Apply stage-specific filters if provided
+        # Apply stage-specific filters if provided (Python filtering)
         if parsed_stage_filters:
             filtered_sessions = []
-            
-            # Build reverse mapping for ADMIN categories
-            reverse_mapping = {}
-            for orig, combined in ADMIN_CATEGORY_MAPPING.items():
-                if combined not in reverse_mapping:
-                    reverse_mapping[combined] = []
-                reverse_mapping[combined].append(orig)
             
             for session in call_sessions:
                 # Create a stage-to-calls mapping for this session
@@ -753,34 +797,6 @@ async def get_admin_campaign_dashboard(
             
             call_sessions = filtered_sessions
         
-        # Apply legacy category filter (applies to latest stage only)
-        elif categories:
-            filtered_sessions = []
-            
-            # Build reverse mapping for ADMIN categories
-            reverse_mapping = {}
-            for orig, combined in ADMIN_CATEGORY_MAPPING.items():
-                if combined not in reverse_mapping:
-                    reverse_mapping[combined] = []
-                reverse_mapping[combined].append(orig)
-            
-            # Convert combined category names to original names
-            original_names = []
-            for cat in categories:
-                if cat in reverse_mapping:
-                    original_names.extend(reverse_mapping[cat])
-                else:
-                    original_names.append(cat)
-            
-            for session in call_sessions:
-                session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
-                latest_call = session_sorted[-1]
-                
-                if latest_call['category_name'] in original_names:
-                    filtered_sessions.append(session)
-            
-            call_sessions = filtered_sessions
-        
         # Sort sessions by latest timestamp
         call_sessions.sort(
             key=lambda session: max(call['timestamp'] for call in session),
@@ -794,13 +810,13 @@ async def get_admin_campaign_dashboard(
         end_idx = start_idx + page_size
         paginated_sessions = call_sessions[start_idx:end_idx]
         
-        # Get all categories for the sidebar (count from ALL sessions before pagination)
+        # Get all categories for the sidebar (use BASE calls for counts, not filtered)
         all_categories_query = "SELECT id, name, color FROM response_categories ORDER BY name"
         db_categories = await conn.fetch(all_categories_query)
         
-        # Count categories from latest stage of each session
+        # Count categories from latest stage of each BASE session (unfiltered)
         category_counts_raw = {}
-        for session in call_sessions:  # Use all sessions for counts, not just paginated
+        for session in base_call_sessions:
             latest_call = sorted(session, key=lambda x: x['stage'] or 0)[-1]
             if latest_call['category_name']:
                 cat_name = latest_call['category_name']
@@ -917,7 +933,6 @@ async def get_admin_campaign_dashboard(
                 has_prev=page > 1
             )
         )
-
 # ============== TRANSFER METRICS ENDPOINT ==============
 
 @router.get("/{campaign_id}/transfer-metrics", response_model=TransferMetrics)
