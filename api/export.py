@@ -8,39 +8,10 @@ import csv
 from core.dependencies import require_roles
 from database.db import get_db
 
+from utils.call import group_calls_by_session
+from utils.mappings import CLIENT_CATEGORY_MAPPING
 
 router = APIRouter(prefix="/export", tags=["Data Export"])
-
-
-# ============== CATEGORY MAPPING ==============
-
-CATEGORY_MAPPING = {
-    "spanishanswermachine": "Answering Machine",
-    "answermachine": "Answering Machine",
-
-    "dnc": "DNC",
-    "dnq": "DNQ",
-    "honeypot": "Honeypot",
-
-    "unknown": "Unclear Response",
-
-    "busy": "Call Back",
-    "already": "Not Interested",
-    "notinterested": "Not Interested",
-    "rebuttal": "Not Interested",
-    "donttransfer": "Not Interested",
-
-    "qualified": "Qualified",
-    "interested": "Qualified",
-
-    "neutral": "Neutral",
-
-    "inaudible": "Inaudible",
-    "notresponding" : "DAIR",
-    "usersilent": "User Silent",
-    "userhangup": "User Hangup",
-}
-
 
 # ============== MODELS ==============
 
@@ -86,53 +57,7 @@ def resolve_export_category(original_category: str, call_data: dict) -> str:
         return "Neutral"
     
     # Default: use the static mapping
-    return CATEGORY_MAPPING.get(original_category, original_category)
-
-def group_calls_by_session(calls: List[dict]) -> List[dict]:
-    """
-    Group calls by number and 2-minute sessions, returning latest stage per session.
-    Calls are considered part of the same session if they're within 2 minutes of each other.
-    """
-    if not calls:
-        return []
-    
-    # Sort by number and timestamp
-    sorted_calls = sorted(calls, key=lambda x: (x['number'], x['timestamp']))
-    
-    sessions = []
-    current_session = []
-    
-    for call in sorted_calls:
-        if not current_session:
-            current_session.append(call)
-        else:
-            last_call = current_session[-1]
-            
-            # Check if same number and within duration window
-            same_number = call['number'] == last_call['number']
-            time_diff = call['timestamp'] - last_call['timestamp']
-            within_window = time_diff <= timedelta(minutes=2)
-            
-            if same_number and within_window:
-                current_session.append(call)
-            else:
-                # Start new session
-                sessions.append(current_session)
-                current_session = [call]
-    
-    # Add last session
-    if current_session:
-        sessions.append(current_session)
-    
-    # Get latest stage from each session (by sorting by stage number)
-    latest_calls = []
-    for session in sessions:
-        # Sort by stage to get the latest
-        session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
-        latest_calls.append(session_sorted[-1])  # Get the last one (highest stage)
-    
-    return latest_calls
-
+    return CLIENT_CATEGORY_MAPPING.get(original_category, original_category)
 
 
 async def get_user_client_id(conn, user_id: int, roles: List[str]) -> Optional[int]:
@@ -281,7 +206,7 @@ async def get_export_options(
             except ValueError:
                 pass
         
-        # Get filtered calls - CHANGED: Added transferred field
+        # Get filtered calls
         filtered_calls_query = f"""
             SELECT c.number, c.stage, c.timestamp, c.transferred,
                    rc.name as category_name, rc.color as category_color
@@ -295,8 +220,14 @@ async def get_export_options(
         # Convert to list of dicts for processing
         calls_list = [dict(call) for call in filtered_calls]
         
-        # Group by 2-minute sessions and get latest stage per session
-        latest_stage_calls = group_calls_by_session(calls_list)
+        # Group by 2-minute sessions - NOW RETURNS List[List[dict]]
+        call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
+        
+        # Get latest stage per session
+        latest_stage_calls = []
+        for session in call_sessions:
+            session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
+            latest_stage_calls.append(session_sorted[-1])
         
         # Get all categories from database that are in the mapping
         categories_query = "SELECT id, name, color FROM response_categories ORDER BY name"
@@ -306,10 +237,10 @@ async def get_export_options(
         mapped_categories = []
         for db_cat in db_categories:
             original_name = db_cat['name'] or 'UNKNOWN'
-            if original_name in CATEGORY_MAPPING:
+            if original_name in CLIENT_CATEGORY_MAPPING:
                 mapped_categories.append(db_cat)
         
-        # Count categories from filtered calls - CHANGED: Use resolver
+        # Count categories from filtered calls
         category_counts_raw = {}
         for call in latest_stage_calls:
             if call['category_name']:
@@ -332,7 +263,7 @@ async def get_export_options(
         combined_counts = {}
         category_colors = {}
         
-        # Initialize all mapped categories with 0 counts - CHANGED: Use resolver
+        # Initialize all mapped categories with 0 counts
         for db_cat in mapped_categories:
             original_name = db_cat['name'] or 'UNKNOWN'
             combined_name = resolve_export_category(original_name, {})  # Empty dict for static mapping
@@ -341,7 +272,7 @@ async def get_export_options(
                 combined_counts[combined_name] = 0
                 category_colors[combined_name] = db_cat['color'] or '#6B7280'
         
-        # Add actual counts from filtered calls - CHANGED: Use resolved category
+        # Add actual counts from filtered calls
         for cat_data in category_counts_raw.values():
             resolved_name = cat_data['resolved_category']
             combined_counts[resolved_name] += cat_data['count']
@@ -403,7 +334,7 @@ async def download_export(
         if export_request.categories:
             # Create reverse mapping to get original category names
             reverse_mapping = {}
-            for orig, combined in CATEGORY_MAPPING.items():
+            for orig, combined in CLIENT_CATEGORY_MAPPING.items():
                 if combined not in reverse_mapping:
                     reverse_mapping[combined] = []
                 reverse_mapping[combined].append(orig)
@@ -415,7 +346,7 @@ async def download_export(
                     original_names.extend(reverse_mapping[cat])
                 else:
                     # Only add if it's in the mapping
-                    if cat in CATEGORY_MAPPING.values():
+                    if cat in CLIENT_CATEGORY_MAPPING.values():
                         original_names.append(cat)
             
             if original_names:
@@ -465,10 +396,16 @@ async def download_export(
         # Convert to list of dicts
         calls_list = [dict(call) for call in all_calls]
         
-        # Group by 2-minute sessions and get latest stage per session
-        filtered_calls = group_calls_by_session(calls_list)
+        # Group by 2-minute sessions - NOW RETURNS List[List[dict]]
+        call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
         
-        # Filter out categories not in mapping - CHANGED: Use resolver
+        # Get latest stage per session
+        filtered_calls = []
+        for session in call_sessions:
+            session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
+            filtered_calls.append(session_sorted[-1])
+        
+        # Filter out categories not in mapping
         filtered_calls = [
             call for call in filtered_calls 
             if not call['category_name'] or resolve_export_category(call['category_name'], call) != ""
@@ -485,7 +422,7 @@ async def download_export(
             'Transferred', 'Stage'
         ])
         
-        # CHANGED: Use resolver when writing to CSV
+        # Use resolver when writing to CSV
         for call in filtered_calls:
             original_category = call['category_name'] or 'Unknown'
             combined_category = resolve_export_category(original_category, call)

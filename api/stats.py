@@ -8,9 +8,9 @@ import io
 from core.dependencies import require_roles
 from database.db import get_db
 
+from utils.call import group_calls_by_session
 
 router = APIRouter(prefix="/campaigns/stats", tags=["General Statistics"])
-
 
 # ============== MODELS ==============
 
@@ -20,7 +20,6 @@ class VoiceTransferStats(BaseModel):
     transferred_calls: int
     transfer_rate: float
     non_transferred_calls: int
-
 
 class CampaignTransferStats(BaseModel):
     campaign_id: int
@@ -35,13 +34,11 @@ class CampaignTransferStats(BaseModel):
     non_transferred_calls: int
     voice_stats: List[VoiceTransferStats]
 
-
 class AllCampaignsTransferResponse(BaseModel):
     start_date: Optional[str]
     end_date: Optional[str]
     total_campaigns: int
     campaigns: List[CampaignTransferStats]
-
 
 class VoiceOverallStats(BaseModel):
     voice_name: str
@@ -49,7 +46,6 @@ class VoiceOverallStats(BaseModel):
     transferred_final_calls: int
     transfer_rate: float
     non_transferred_final_calls: int
-
 
 class OverallVoiceStatsResponse(BaseModel):
     start_date: Optional[str]
@@ -59,7 +55,6 @@ class OverallVoiceStatsResponse(BaseModel):
     overall_transfer_rate: float
     voice_stats: List[VoiceOverallStats]
 
-
 class CallStageData(BaseModel):
     stage: int
     transcription: Optional[str]
@@ -67,7 +62,6 @@ class CallStageData(BaseModel):
     voice_name: Optional[str]
     transferred: bool
     timestamp: datetime
-
 
 class CallLookupResult(BaseModel):
     number: str
@@ -80,7 +74,6 @@ class CallLookupResult(BaseModel):
     final_decision_transferred: bool
     total_stages: int
 
-
 class CallLookupResponse(BaseModel):
     total_numbers_searched: int
     numbers_found: int
@@ -89,8 +82,8 @@ class CallLookupResponse(BaseModel):
     not_found_numbers: List[str]
     filters_applied: Dict[str, Optional[str]]
 
-
 # ============== HELPER FUNCTIONS ==============
+
 
 async def check_campaign_is_active(conn, campaign_id: int) -> bool:
     """Check if campaign had any calls in the last 1 minute"""
@@ -111,7 +104,6 @@ def calculate_transfer_rate(transferred: int, total: int) -> float:
     if total == 0:
         return 0.0
     return round((transferred / total) * 100, 2)
-
 
 async def build_date_filter(start_date: str, end_date: str, start_time: str, end_time: str):
     """Build date/time filter parameters"""
@@ -147,7 +139,6 @@ async def build_date_filter(start_date: str, end_date: str, start_time: str, end
     
     return where_clauses, params, param_count
 
-
 def parse_csv_numbers(content: bytes) -> List[str]:
     """Parse CSV file and extract numbers"""
     try:
@@ -174,7 +165,6 @@ def parse_csv_numbers(content: bytes) -> List[str]:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to parse CSV file: {str(e)}"
         )
-
 
 async def fetch_call_data(
     numbers: List[str], 
@@ -306,7 +296,6 @@ async def fetch_call_data(
     
     return results, not_found
 
-
 def generate_csv_output(
     results: List[CallLookupResult], 
     not_found: List[str],
@@ -368,7 +357,6 @@ def generate_csv_output(
     
     return output.getvalue()
 
-
 # ============== ADMIN ENDPOINTS ==============
 
 @router.get("/all-campaigns-transfer-stats", response_model=AllCampaignsTransferResponse)
@@ -388,7 +376,7 @@ async def get_all_campaigns_transfer_stats(
     - Transfer rates per voice
     - Overall campaign transfer stats
     
-    All statistics are based on the FINAL STAGE of each call (last stage per number).
+    All statistics are based on the FINAL STAGE of each call session (last stage per number within 2-minute windows).
     Only includes campaigns that are not Archived.
     """
     pool = await get_db()
@@ -448,7 +436,7 @@ async def get_all_campaigns_transfer_stats(
             # Calculate is_active on the fly
             is_active = await check_campaign_is_active(conn, campaign_id)
             
-            # Build where clause for latest stages
+            # Build where clause
             base_where = ["c.client_campaign_model_id = $1"]
             params = [campaign_id] + date_params
             
@@ -457,30 +445,36 @@ async def get_all_campaigns_transfer_stats(
             
             base_where_clause = " AND ".join(base_where)
             
-            # Get latest stage for each number (final stage of the call)
-            latest_stages_query = f"""
-                WITH latest_stages AS (
-                    SELECT 
-                        c.number,
-                        MAX(c.stage) as max_stage
-                    FROM calls c
-                    WHERE {base_where_clause}
-                    GROUP BY c.number
-                )
+            # Get all calls for this campaign
+            all_calls_query = f"""
                 SELECT 
                     c.id,
                     c.number,
+                    c.stage,
+                    c.timestamp,
                     c.transferred,
                     v.name as voice_name
                 FROM calls c
-                INNER JOIN latest_stages ls ON c.number = ls.number AND c.stage = ls.max_stage
                 LEFT JOIN voices v ON c.voice_id = v.id
-                WHERE c.client_campaign_model_id = $1
+                WHERE {base_where_clause}
+                ORDER BY c.number, c.timestamp, c.stage
             """
-            final_calls = await conn.fetch(latest_stages_query, *params)
+            all_calls = await conn.fetch(all_calls_query, *params)
             
-            if not final_calls:
+            if not all_calls:
                 continue
+            
+            # Convert to list of dicts for session grouping
+            calls_list = [dict(call) for call in all_calls]
+            
+            # Group calls into sessions (2-minute window)
+            call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
+            
+            # Get latest stage from each session
+            final_calls = []
+            for session in call_sessions:
+                session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
+                final_calls.append(session_sorted[-1])
             
             # Aggregate by voice
             voice_data = {}
@@ -554,7 +548,7 @@ async def get_overall_voice_stats(
     - Transfer rate per voice
     - Non-transferred calls per voice
     
-    All statistics are based on the FINAL STAGE of each call (last stage per number).
+    All statistics are based on the FINAL STAGE of each call session (last stage per number within 2-minute windows).
     Aggregates data across all campaigns to show overall voice performance.
     Only includes campaigns that are not Archived.
     """
@@ -608,33 +602,24 @@ async def get_overall_voice_stats(
         
         where_clause = " AND ".join(where_clauses)
         
-        # Get latest stage for each number across all campaigns (final stage of the call)
-        final_calls_query = f"""
-            WITH latest_stages AS (
-                SELECT 
-                    c.client_campaign_model_id,
-                    c.number,
-                    MAX(c.stage) as max_stage
-                FROM calls c
-                WHERE {where_clause}
-                GROUP BY c.client_campaign_model_id, c.number
-            )
+        # Get all calls across all campaigns
+        all_calls_query = f"""
             SELECT 
                 c.id,
                 c.number,
+                c.client_campaign_model_id,
+                c.stage,
+                c.timestamp,
                 c.transferred,
                 v.name as voice_name
             FROM calls c
-            INNER JOIN latest_stages ls 
-                ON c.client_campaign_model_id = ls.client_campaign_model_id 
-                AND c.number = ls.number 
-                AND c.stage = ls.max_stage
             LEFT JOIN voices v ON c.voice_id = v.id
-            WHERE c.client_campaign_model_id = ANY($1)
+            WHERE {where_clause}
+            ORDER BY c.client_campaign_model_id, c.number, c.timestamp, c.stage
         """
-        final_calls = await conn.fetch(final_calls_query, *params)
+        all_calls = await conn.fetch(all_calls_query, *params)
         
-        if not final_calls:
+        if not all_calls:
             return OverallVoiceStatsResponse(
                 start_date=start_date or None,
                 end_date=end_date or None,
@@ -644,12 +629,32 @@ async def get_overall_voice_stats(
                 voice_stats=[]
             )
         
+        # Convert to list of dicts for session grouping
+        calls_list = [dict(call) for call in all_calls]
+        
+        # Group calls into sessions (2-minute window) - need to group by campaign_id AND number
+        # First, separate by campaign
+        calls_by_campaign = {}
+        for call in calls_list:
+            campaign_id = call['client_campaign_model_id']
+            if campaign_id not in calls_by_campaign:
+                calls_by_campaign[campaign_id] = []
+            calls_by_campaign[campaign_id].append(call)
+        
+        # Group sessions within each campaign, then combine
+        all_final_calls = []
+        for campaign_calls in calls_by_campaign.values():
+            campaign_sessions = group_calls_by_session(campaign_calls, duration_minutes=2)
+            for session in campaign_sessions:
+                session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
+                all_final_calls.append(session_sorted[-1])
+        
         # Aggregate by voice across all campaigns
         voice_data = {}
-        total_calls = len(final_calls)
+        total_calls = len(all_final_calls)
         total_transferred = 0
         
-        for call in final_calls:
+        for call in all_final_calls:
             voice_name = call['voice_name'] or 'Unknown'
             transferred = call['transferred'] or False
             
@@ -684,7 +689,6 @@ async def get_overall_voice_stats(
             overall_transfer_rate=calculate_transfer_rate(total_transferred, total_calls),
             voice_stats=voice_stats
         )
-
 
 @router.post("/lookup-calls-json", response_model=CallLookupResponse)
 async def lookup_calls_json(
@@ -755,7 +759,6 @@ async def lookup_calls_json(
         filters_applied=filters_applied
     )
 
-
 @router.post("/lookup-calls-csv")
 async def lookup_calls_csv(
     file: UploadFile = File(..., description="CSV file containing phone numbers"),
@@ -809,7 +812,7 @@ async def lookup_calls_csv(
             start_date=start_date,
             end_date=end_date
         )
-    
+
     # Generate CSV output with filter information
     filters = {
         "client_id": str(client_id) if client_id else None,
@@ -817,10 +820,10 @@ async def lookup_calls_csv(
         "end_date": end_date or None
     }
     csv_content = generate_csv_output(results, not_found, filters)
-    
+
     # Create streaming response
     output = io.BytesIO(csv_content.encode('utf-8'))
-    
+
     # Build filename with filter information
     filename_parts = ['call_lookup_results']
     if client_id:
@@ -831,7 +834,7 @@ async def lookup_calls_csv(
         filename_parts.append(f'to_{end_date}')
     filename_parts.append(datetime.now().strftime('%Y%m%d_%H%M%S'))
     filename = '_'.join(filename_parts) + '.csv'
-    
+
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",
