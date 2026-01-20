@@ -122,6 +122,12 @@ class CampaignDashboardResponse(BaseModel):
 
 # ============== ADMIN MODELS ==============
 
+
+class StageFilter(BaseModel):
+    """Model for stage-specific category filters"""
+    stage: int
+    categories: List[str]
+
 class CallStageDetail(BaseModel):
     stage: int
     category: str
@@ -566,16 +572,28 @@ async def get_admin_campaign_dashboard(
     start_time: str = Query("", description="Start time HH:MM"),
     end_date: str = Query("", description="End date YYYY-MM-DD"),
     end_time: str = Query("", description="End time HH:MM"),
-    categories: List[str] = Query([], description="Selected categories"),
+    categories: List[str] = Query([], description="Selected categories (applies to latest stage only)"),
+    stage_filters: str = Query("", description="JSON string of stage-specific filters: [{\"stage\": 1, \"categories\": [\"cat1\", \"cat2\"]}, ...]"),
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(50, ge=1, le=500, description="Records per page"),
     sort_order: str = Query("desc", regex="^(asc|desc)$", description="Sort order for timestamp: asc or desc")
 ):
-    """Get admin campaign dashboard with detailed call records including all stages (grouped by 2-minute sessions)."""
+    """
+    Get admin campaign dashboard with detailed call records including all stages.
+    
+    Supports two types of category filtering:
+    1. Legacy `categories` param: filters by latest stage category only
+    2. New `stage_filters` param: filters by specific stage categories (JSON array)
+    
+    Example stage_filters: '[{"stage": 1, "categories": ["unknown"]}, {"stage": 5, "categories": ["already"]}]'
+    This would show only sessions where stage 1 has "unknown" AND stage 5 has "already".
+    """
+    import json
+    
     pool = await get_db()
     
     async with pool.acquire() as conn:
-        # Admin can see all statuses, no ownership check needed
+        # Verify campaign access (admin can see all)
         access_query = """
             SELECT ccm.id, ccm.client_id, c.name as client_name,
                    ca.name as campaign_name, m.name as model_name,
@@ -598,16 +616,29 @@ async def get_admin_campaign_dashboard(
                 detail="Campaign not found"
             )
         
-        
+        # Parse stage filters
+        parsed_stage_filters = []
+        if stage_filters:
+            try:
+                stage_filter_data = json.loads(stage_filters)
+                if isinstance(stage_filter_data, list):
+                    parsed_stage_filters = [
+                        StageFilter(**sf) for sf in stage_filter_data
+                    ]
+            except (json.JSONDecodeError, ValueError) as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid stage_filters format: {str(e)}"
+                )
         
         # Default to today if no filters
-        has_any_filter = any([search, list_id, start_date, end_date, categories])
+        has_any_filter = any([search, list_id, start_date, end_date, categories, parsed_stage_filters])
         if not has_any_filter:
             today = date.today()
             start_date = today.strftime('%Y-%m-%d')
             end_date = today.strftime('%Y-%m-%d')
         
-        # Build query
+        # Build base query (without category filters - we'll filter in Python for efficiency)
         where_clauses = ["c.client_campaign_model_id = $1"]
         params = [campaign_id]
         param_count = 1
@@ -648,25 +679,7 @@ async def get_admin_campaign_dashboard(
             except ValueError:
                 pass
         
-        if categories:
-            reverse_mapping = {}
-            for orig, combined in ADMIN_CATEGORY_MAPPING.items():
-                if combined not in reverse_mapping:
-                    reverse_mapping[combined] = []
-                reverse_mapping[combined].append(orig)
-            
-            original_names = []
-            for cat in categories:
-                if cat in reverse_mapping:
-                    original_names.extend(reverse_mapping[cat])
-                else:
-                    original_names.append(cat)
-            
-            if original_names:
-                param_count += 1
-                where_clauses.append(f"rc.name = ANY(${param_count})")
-                params.append(original_names)
-        
+        # Fetch all calls (no category filter in SQL for better performance with stage filters)
         calls_query = f"""
             SELECT c.id, c.number, c.list_id, c.timestamp, c.stage, c.transferred,
                    c.transcription, rc.name as category_name, rc.color as category_color,
@@ -685,21 +698,109 @@ async def get_admin_campaign_dashboard(
         # Group calls into sessions (2-minute window)
         call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
         
-        # Pagination on sessions
+        # Apply stage-specific filters if provided
+        if parsed_stage_filters:
+            filtered_sessions = []
+            
+            # Build reverse mapping for ADMIN categories
+            reverse_mapping = {}
+            for orig, combined in ADMIN_CATEGORY_MAPPING.items():
+                if combined not in reverse_mapping:
+                    reverse_mapping[combined] = []
+                reverse_mapping[combined].append(orig)
+            
+            for session in call_sessions:
+                # Create a stage-to-calls mapping for this session
+                stage_map = {}
+                for call in session:
+                    stage_num = call['stage'] or 0
+                    if stage_num not in stage_map:
+                        stage_map[stage_num] = []
+                    stage_map[stage_num].append(call)
+                
+                # Check if session matches ALL stage filters
+                matches_all_filters = True
+                
+                for stage_filter in parsed_stage_filters:
+                    stage_num = stage_filter.stage
+                    required_categories = stage_filter.categories
+                    
+                    # Convert combined category names to original names
+                    original_names = []
+                    for cat in required_categories:
+                        if cat in reverse_mapping:
+                            original_names.extend(reverse_mapping[cat])
+                        else:
+                            original_names.append(cat)
+                    
+                    # Check if this stage exists and has any of the required categories
+                    if stage_num not in stage_map:
+                        matches_all_filters = False
+                        break
+                    
+                    stage_calls = stage_map[stage_num]
+                    stage_has_category = any(
+                        call['category_name'] in original_names 
+                        for call in stage_calls
+                    )
+                    
+                    if not stage_has_category:
+                        matches_all_filters = False
+                        break
+                
+                if matches_all_filters:
+                    filtered_sessions.append(session)
+            
+            call_sessions = filtered_sessions
+        
+        # Apply legacy category filter (applies to latest stage only)
+        elif categories:
+            filtered_sessions = []
+            
+            # Build reverse mapping for ADMIN categories
+            reverse_mapping = {}
+            for orig, combined in ADMIN_CATEGORY_MAPPING.items():
+                if combined not in reverse_mapping:
+                    reverse_mapping[combined] = []
+                reverse_mapping[combined].append(orig)
+            
+            # Convert combined category names to original names
+            original_names = []
+            for cat in categories:
+                if cat in reverse_mapping:
+                    original_names.extend(reverse_mapping[cat])
+                else:
+                    original_names.append(cat)
+            
+            for session in call_sessions:
+                session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
+                latest_call = session_sorted[-1]
+                
+                if latest_call['category_name'] in original_names:
+                    filtered_sessions.append(session)
+            
+            call_sessions = filtered_sessions
+        
+        # Sort sessions by latest timestamp
+        call_sessions.sort(
+            key=lambda session: max(call['timestamp'] for call in session),
+            reverse=(sort_order.lower() == 'desc')
+        )
+        
+        # Pagination on filtered sessions
         total_calls = len(call_sessions)
         total_pages = (total_calls + page_size - 1) // page_size if total_calls > 0 else 1
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
         paginated_sessions = call_sessions[start_idx:end_idx]
-        paginated_sessions.sort(key=lambda session: max(call['timestamp'] for call in session), reverse=True)
-
         
-        # Get categories (from latest call in each session)
+        # Get all categories for the sidebar (count from ALL sessions before pagination)
         all_categories_query = "SELECT id, name, color FROM response_categories ORDER BY name"
         db_categories = await conn.fetch(all_categories_query)
         
+        # Count categories from latest stage of each session
         category_counts_raw = {}
-        for session in call_sessions:
+        for session in call_sessions:  # Use all sessions for counts, not just paginated
             latest_call = sorted(session, key=lambda x: x['stage'] or 0)[-1]
             if latest_call['category_name']:
                 cat_name = latest_call['category_name']
@@ -714,6 +815,7 @@ async def get_admin_campaign_dashboard(
                 if latest_call.get('transferred'):
                     category_counts_raw[cat_name]['transferred_count'] += 1
         
+        # Combine categories using ADMIN_CATEGORY_MAPPING
         combined_counts = {}
         combined_transferred_counts = {}
         category_colors = {}
@@ -745,7 +847,7 @@ async def get_admin_campaign_dashboard(
                 original_name=combined_name
             ))
         
-        # Format detailed calls
+        # Format detailed calls (only paginated sessions)
         calls_data = []
         for session in paginated_sessions:
             # Sort stages by stage number
@@ -814,7 +916,8 @@ async def get_admin_campaign_dashboard(
                 has_next=page < total_pages,
                 has_prev=page > 1
             )
-        )    
+        )
+
 # ============== TRANSFER METRICS ENDPOINT ==============
 
 @router.get("/{campaign_id}/transfer-metrics", response_model=TransferMetrics)
