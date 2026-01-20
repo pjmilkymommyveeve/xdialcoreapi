@@ -45,9 +45,9 @@ class AllCampaignsTransferResponse(BaseModel):
 class VoiceOverallStats(BaseModel):
     voice_name: str
     total_final_calls: int
-    transferred_final_calls: int
+    transferred_calls: int
     transfer_rate: float
-    non_transferred_final_calls: int
+    non_transferred_calls: int
 
 class OverallVoiceStatsResponse(BaseModel):
     start_date: Optional[str]
@@ -722,9 +722,9 @@ async def get_overall_voice_stats(
             voice_stats.append(VoiceOverallStats(
                 voice_name=voice_name,
                 total_final_calls=data['total'],
-                transferred_final_calls=data['transferred'],
+                transferred_calls=data['transferred'],
                 transfer_rate=calculate_transfer_rate(data['transferred'], data['total']),
-                non_transferred_final_calls=data['total'] - data['transferred']
+                non_transferred_calls=data['total'] - data['transferred']
             ))
         
         # Calculate overall stats
