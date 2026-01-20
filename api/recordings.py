@@ -105,6 +105,7 @@ async def fetch_recordings_from_server(
         
         api_url = f"{domain}server_api/fetch_recording.php"
         params = {'date': date, 'extension': extension}
+        # Note: We still pass number to PHP API in case it gets implemented later
         if number:
             params['number'] = number
         
@@ -296,6 +297,17 @@ async def fetch_campaign_recordings(
                     if result:
                         servers_with_data += 1
                     all_recordings.extend(result)
+        
+        # ===== CLIENT-SIDE NUMBER FILTERING =====
+        # Since the PHP API doesn't filter by number, we do it here
+        if number:
+            # Normalize the search number (remove any non-digits)
+            search_number = ''.join(filter(str.isdigit, number))
+            # Filter recordings that match the number
+            all_recordings = [
+                rec for rec in all_recordings 
+                if search_number in rec['phone_number']
+            ]
         
         total_count = len(all_recordings)
         
