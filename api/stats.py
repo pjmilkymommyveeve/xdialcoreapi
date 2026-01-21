@@ -438,12 +438,11 @@ async def get_all_campaigns_transfer_stats(
         # Build the complete WHERE clause for campaigns
         campaign_filter = " AND ".join(campaign_where_parts) if campaign_where_parts else "1=1"
         
-        # Optimized query using CTE to fetch all data at once
+        # Optimized query - all aggregations done in database
         query = f"""
             WITH active_campaigns AS (
                 SELECT 
                     ccm.id as campaign_id,
-                    ccm.client_id,
                     cl.name as client_name,
                     ca.name as campaign_name,
                     m.name as model_name,
@@ -458,9 +457,17 @@ async def get_all_campaigns_transfer_stats(
                 WHERE {campaign_filter}
                     AND (sh.id IS NULL OR s.status_name != 'Archived')
             ),
+            campaign_activity AS (
+                SELECT 
+                    c.client_campaign_model_id as campaign_id,
+                    TRUE as is_active
+                FROM calls c
+                WHERE c.client_campaign_model_id IN (SELECT campaign_id FROM active_campaigns)
+                    AND c.timestamp >= NOW() - INTERVAL '1 minute'
+                GROUP BY c.client_campaign_model_id
+            ),
             all_calls AS (
                 SELECT 
-                    c.id,
                     c.number,
                     c.stage,
                     c.timestamp,
@@ -473,6 +480,55 @@ async def get_all_campaigns_transfer_stats(
                 LEFT JOIN response_categories rc ON c.response_category_id = rc.id
                 WHERE c.client_campaign_model_id IN (SELECT campaign_id FROM active_campaigns)
                     {' AND ' + ' AND '.join(date_where) if date_where else ''}
+            ),
+            session_grouped AS (
+                SELECT 
+                    *,
+                    CASE 
+                        WHEN LAG(number) OVER (PARTITION BY client_campaign_model_id ORDER BY number, timestamp) = number
+                             AND timestamp - LAG(timestamp) OVER (PARTITION BY client_campaign_model_id ORDER BY number, timestamp) <= INTERVAL '2 minutes'
+                        THEN 0
+                        ELSE 1
+                    END as session_start
+                FROM all_calls
+            ),
+            sessions_identified AS (
+                SELECT 
+                    *,
+                    SUM(session_start) OVER (PARTITION BY client_campaign_model_id ORDER BY number, timestamp) as session_id
+                FROM session_grouped
+            ),
+            final_stages AS (
+                SELECT DISTINCT ON (client_campaign_model_id, session_id)
+                    client_campaign_model_id,
+                    session_id,
+                    voice_name,
+                    transferred,
+                    response_category
+                FROM sessions_identified
+                ORDER BY client_campaign_model_id, session_id, stage DESC NULLS LAST
+            ),
+            voice_stats AS (
+                SELECT 
+                    client_campaign_model_id as campaign_id,
+                    voice_name,
+                    COUNT(*) as total_calls,
+                    SUM(CASE WHEN transferred THEN 1 ELSE 0 END) as transferred_calls,
+                    SUM(CASE WHEN transferred AND response_category = 'Qualified' THEN 1 ELSE 0 END) as qualified_transferred_calls
+                FROM final_stages
+                WHERE voice_name IS NOT NULL
+                GROUP BY client_campaign_model_id, voice_name
+            ),
+            campaign_totals AS (
+                SELECT 
+                    client_campaign_model_id as campaign_id,
+                    COUNT(*) as total_sessions,
+                    SUM(CASE WHEN voice_name IS NULL THEN 1 ELSE 0 END) as null_voice_calls,
+                    SUM(CASE WHEN voice_name IS NOT NULL THEN 1 ELSE 0 END) as voiced_calls,
+                    SUM(CASE WHEN voice_name IS NOT NULL AND transferred THEN 1 ELSE 0 END) as voiced_transferred,
+                    SUM(CASE WHEN voice_name IS NOT NULL AND transferred AND response_category = 'Qualified' THEN 1 ELSE 0 END) as qualified_transferred
+                FROM final_stages
+                GROUP BY client_campaign_model_id
             )
             SELECT 
                 ac.campaign_id,
@@ -480,16 +536,21 @@ async def get_all_campaigns_transfer_stats(
                 ac.campaign_name,
                 ac.model_name,
                 ac.current_status,
-                c.id,
-                c.number,
-                c.stage,
-                c.timestamp,
-                c.transferred,
-                c.voice_name,
-                c.response_category
+                COALESCE(ca.is_active, FALSE) as is_active,
+                COALESCE(ct.total_sessions, 0) as total_sessions,
+                COALESCE(ct.null_voice_calls, 0) as null_voice_calls,
+                COALESCE(ct.voiced_calls, 0) as voiced_calls,
+                COALESCE(ct.voiced_transferred, 0) as voiced_transferred,
+                COALESCE(ct.qualified_transferred, 0) as qualified_transferred,
+                vs.voice_name,
+                vs.total_calls as voice_total_calls,
+                vs.transferred_calls as voice_transferred_calls,
+                vs.qualified_transferred_calls as voice_qualified_transferred
             FROM active_campaigns ac
-            LEFT JOIN all_calls c ON ac.campaign_id = c.client_campaign_model_id
-            ORDER BY ac.campaign_id, c.number, c.timestamp, c.stage
+            LEFT JOIN campaign_activity ca ON ac.campaign_id = ca.campaign_id
+            LEFT JOIN campaign_totals ct ON ac.campaign_id = ct.campaign_id
+            LEFT JOIN voice_stats vs ON ac.campaign_id = vs.campaign_id
+            ORDER BY ac.campaign_id, vs.voice_name
         """
         
         all_params = campaign_params + date_params
@@ -503,135 +564,63 @@ async def get_all_campaigns_transfer_stats(
                 campaigns=[]
             )
         
-        # Group data by campaign
-        campaigns_data = {}
+        # Process aggregated results
+        campaigns_dict = {}
+        
         for row in rows:
             campaign_id = row['campaign_id']
             
-            if campaign_id not in campaigns_data:
-                campaigns_data[campaign_id] = {
-                    'info': {
-                        'id': campaign_id,
-                        'client_name': row['client_name'],
-                        'campaign_name': row['campaign_name'],
-                        'model_name': row['model_name'],
-                        'current_status': row['current_status']
-                    },
-                    'calls': []
-                }
-            
-            # Only add calls if they exist (LEFT JOIN might return null)
-            if row['id'] is not None:
-                campaigns_data[campaign_id]['calls'].append({
-                    'id': row['id'],
-                    'number': row['number'],
-                    'stage': row['stage'],
-                    'timestamp': row['timestamp'],
-                    'transferred': row['transferred'],
-                    'voice_name': row['voice_name'],
-                    'response_category': row['response_category']
-                })
-        
-        campaign_stats_list = []
-        
-        # Process each campaign
-        for campaign_id, data in campaigns_data.items():
-            # Check if campaign is active
-            is_active = await check_campaign_is_active(conn, campaign_id)
-            
-            calls = data['calls']
-            
-            if not calls:
-                continue
-            
-            # Group calls into sessions (2-minute window)
-            call_sessions = group_calls_by_session(calls, duration_minutes=2)
-            
-            # Get latest stage from each session
-            final_calls = []
-            for session in call_sessions:
-                session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
-                final_calls.append(session_sorted[-1])
-            
-            # Separate null voice calls from voiced calls
-            null_voice_calls = [call for call in final_calls if call['voice_name'] is None]
-            voiced_calls = [call for call in final_calls if call['voice_name'] is not None]
-            
-            # Aggregate by voice (only for non-null voices)
-            voice_data = {}
-            total_voiced_calls = len(voiced_calls)
-            total_voiced_transferred = 0
-            total_qualified_transferred = 0
-            
-            for call in voiced_calls:
-                voice_name = call['voice_name']
-                transferred = call['transferred'] or False
-                is_qualified = transferred and call['response_category'] == 'Qualified'
+            # Initialize campaign if not exists
+            if campaign_id not in campaigns_dict:
+                total_voiced_calls = row['voiced_calls']
+                total_voiced_transferred = row['voiced_transferred']
+                total_qualified_transferred = row['qualified_transferred']
+                total_non_qualified = total_voiced_transferred - total_qualified_transferred
                 
-                if voice_name not in voice_data:
-                    voice_data[voice_name] = {
-                        'total': 0,
-                        'transferred': 0,
-                        'qualified_transferred': 0
-                    }
-                
-                voice_data[voice_name]['total'] += 1
-                if transferred:
-                    voice_data[voice_name]['transferred'] += 1
-                    total_voiced_transferred += 1
-                    if is_qualified:
-                        voice_data[voice_name]['qualified_transferred'] += 1
-                        total_qualified_transferred += 1
+                campaigns_dict[campaign_id] = CampaignTransferStats(
+                    campaign_id=campaign_id,
+                    campaign_name=row['campaign_name'],
+                    model_name=row['model_name'],
+                    client_name=row['client_name'],
+                    is_active=row['is_active'],
+                    current_status=row['current_status'],
+                    total_calls=total_voiced_calls,
+                    transferred_calls=total_voiced_transferred,
+                    transfer_rate=calculate_transfer_rate(total_voiced_transferred, total_voiced_calls),
+                    non_transferred_calls=total_voiced_calls - total_voiced_transferred,
+                    qualified_transferred_calls=total_qualified_transferred,
+                    qualified_transfer_rate=calculate_qualified_rate(total_qualified_transferred, total_voiced_transferred),
+                    non_qualified_transferred_calls=total_non_qualified,
+                    non_qualified_transfer_rate=calculate_qualified_rate(total_non_qualified, total_voiced_transferred),
+                    null_voice_calls=row['null_voice_calls'],
+                    null_voice_ratio=calculate_null_voice_ratio(row['null_voice_calls'], row['total_sessions']),
+                    voice_stats=[]
+                )
             
-            # Build voice stats list (only for non-null voices)
-            voice_stats = []
-            for voice_name in sorted(voice_data.keys()):
-                vdata = voice_data[voice_name]
-                non_qualified = vdata['transferred'] - vdata['qualified_transferred']
+            # Add voice stats if present
+            if row['voice_name'] is not None:
+                voice_total = row['voice_total_calls']
+                voice_transferred = row['voice_transferred_calls']
+                voice_qualified = row['voice_qualified_transferred']
+                voice_non_qualified = voice_transferred - voice_qualified
                 
-                voice_stats.append(VoiceTransferStats(
-                    voice_name=voice_name,
-                    total_calls=vdata['total'],
-                    transferred_calls=vdata['transferred'],
-                    transfer_rate=calculate_transfer_rate(vdata['transferred'], vdata['total']),
-                    non_transferred_calls=vdata['total'] - vdata['transferred'],
-                    qualified_transferred_calls=vdata['qualified_transferred'],
-                    qualified_transfer_rate=calculate_qualified_rate(vdata['qualified_transferred'], vdata['transferred']),
-                    non_qualified_transferred_calls=non_qualified,
-                    non_qualified_transfer_rate=calculate_qualified_rate(non_qualified, vdata['transferred'])
+                campaigns_dict[campaign_id].voice_stats.append(VoiceTransferStats(
+                    voice_name=row['voice_name'],
+                    total_calls=voice_total,
+                    transferred_calls=voice_transferred,
+                    transfer_rate=calculate_transfer_rate(voice_transferred, voice_total),
+                    non_transferred_calls=voice_total - voice_transferred,
+                    qualified_transferred_calls=voice_qualified,
+                    qualified_transfer_rate=calculate_qualified_rate(voice_qualified, voice_transferred),
+                    non_qualified_transferred_calls=voice_non_qualified,
+                    non_qualified_transfer_rate=calculate_qualified_rate(voice_non_qualified, voice_transferred)
                 ))
-            
-            # Calculate overall stats (including null voice calls for total count)
-            total_all_calls = len(final_calls)
-            null_voice_count = len(null_voice_calls)
-            total_non_qualified_transferred = total_voiced_transferred - total_qualified_transferred
-            
-            # Add campaign stats
-            campaign_stats_list.append(CampaignTransferStats(
-                campaign_id=data['info']['id'],
-                campaign_name=data['info']['campaign_name'],
-                model_name=data['info']['model_name'],
-                client_name=data['info']['client_name'],
-                is_active=is_active,
-                current_status=data['info']['current_status'],
-                total_calls=total_voiced_calls,
-                transferred_calls=total_voiced_transferred,
-                transfer_rate=calculate_transfer_rate(total_voiced_transferred, total_voiced_calls),
-                non_transferred_calls=total_voiced_calls - total_voiced_transferred,
-                qualified_transferred_calls=total_qualified_transferred,
-                qualified_transfer_rate=calculate_qualified_rate(total_qualified_transferred, total_voiced_transferred),
-                non_qualified_transferred_calls=total_non_qualified_transferred,
-                non_qualified_transfer_rate=calculate_qualified_rate(total_non_qualified_transferred, total_voiced_transferred),
-                null_voice_calls=null_voice_count,
-                null_voice_ratio=calculate_null_voice_ratio(null_voice_count, total_all_calls),
-                voice_stats=voice_stats
-            ))
         
         return AllCampaignsTransferResponse(
             start_date=start_date or None,
             end_date=end_date or None,
-            total_campaigns=len(campaign_stats_list),
-            campaigns=campaign_stats_list
+            total_campaigns=len(campaigns_dict),
+            campaigns=list(campaigns_dict.values())
         )
 
 @router.get("/overall-voice-stats", response_model=OverallVoiceStatsResponse)
@@ -682,7 +671,7 @@ async def get_overall_voice_stats(
         
         campaign_filter = " AND ".join(campaign_where_parts) if campaign_where_parts else "1=1"
         
-        # Optimized query using CTE
+        # Optimized query - all aggregations done in database
         query = f"""
             WITH active_campaigns AS (
                 SELECT ccm.id as campaign_id
@@ -691,28 +680,87 @@ async def get_overall_voice_stats(
                 LEFT JOIN status s ON sh.status_id = s.id
                 WHERE {campaign_filter}
                     AND (sh.id IS NULL OR s.status_name != 'Archived')
+            ),
+            all_calls AS (
+                SELECT 
+                    c.number,
+                    c.client_campaign_model_id,
+                    c.stage,
+                    c.timestamp,
+                    c.transferred,
+                    v.name as voice_name,
+                    rc.name as response_category
+                FROM calls c
+                LEFT JOIN voices v ON c.voice_id = v.id
+                LEFT JOIN response_categories rc ON c.response_category_id = rc.id
+                WHERE c.client_campaign_model_id IN (SELECT campaign_id FROM active_campaigns)
+                    {' AND ' + ' AND '.join(date_where) if date_where else ''}
+            ),
+            session_grouped AS (
+                SELECT 
+                    *,
+                    CASE 
+                        WHEN LAG(number) OVER (PARTITION BY client_campaign_model_id ORDER BY number, timestamp) = number
+                             AND timestamp - LAG(timestamp) OVER (PARTITION BY client_campaign_model_id ORDER BY number, timestamp) <= INTERVAL '2 minutes'
+                        THEN 0
+                        ELSE 1
+                    END as session_start
+                FROM all_calls
+            ),
+            sessions_identified AS (
+                SELECT 
+                    *,
+                    SUM(session_start) OVER (PARTITION BY client_campaign_model_id ORDER BY number, timestamp) as session_id
+                FROM session_grouped
+            ),
+            final_stages AS (
+                SELECT DISTINCT ON (client_campaign_model_id, session_id)
+                    client_campaign_model_id,
+                    session_id,
+                    voice_name,
+                    transferred,
+                    response_category
+                FROM sessions_identified
+                ORDER BY client_campaign_model_id, session_id, stage DESC NULLS LAST
+            ),
+            voice_aggregates AS (
+                SELECT 
+                    voice_name,
+                    COUNT(*) as total_calls,
+                    SUM(CASE WHEN transferred THEN 1 ELSE 0 END) as transferred_calls,
+                    SUM(CASE WHEN transferred AND response_category = 'Qualified' THEN 1 ELSE 0 END) as qualified_transferred_calls
+                FROM final_stages
+                WHERE voice_name IS NOT NULL
+                GROUP BY voice_name
+            ),
+            overall_totals AS (
+                SELECT 
+                    COUNT(*) as total_sessions,
+                    SUM(CASE WHEN voice_name IS NULL THEN 1 ELSE 0 END) as null_voice_calls,
+                    SUM(CASE WHEN voice_name IS NOT NULL THEN 1 ELSE 0 END) as voiced_calls,
+                    SUM(CASE WHEN voice_name IS NOT NULL AND transferred THEN 1 ELSE 0 END) as voiced_transferred,
+                    SUM(CASE WHEN voice_name IS NOT NULL AND transferred AND response_category = 'Qualified' THEN 1 ELSE 0 END) as qualified_transferred
+                FROM final_stages
             )
             SELECT 
-                c.id,
-                c.number,
-                c.client_campaign_model_id,
-                c.stage,
-                c.timestamp,
-                c.transferred,
-                v.name as voice_name,
-                rc.name as response_category
-            FROM calls c
-            LEFT JOIN voices v ON c.voice_id = v.id
-            LEFT JOIN response_categories rc ON c.response_category_id = rc.id
-            WHERE c.client_campaign_model_id IN (SELECT campaign_id FROM active_campaigns)
-                {' AND ' + ' AND '.join(date_where) if date_where else ''}
-            ORDER BY c.client_campaign_model_id, c.number, c.timestamp, c.stage
+                ot.total_sessions,
+                ot.null_voice_calls,
+                ot.voiced_calls,
+                ot.voiced_transferred,
+                ot.qualified_transferred,
+                va.voice_name,
+                va.total_calls as voice_total_calls,
+                va.transferred_calls as voice_transferred_calls,
+                va.qualified_transferred_calls as voice_qualified_transferred
+            FROM overall_totals ot
+            LEFT JOIN voice_aggregates va ON TRUE
+            ORDER BY va.voice_name
         """
         
         all_params = campaign_params + date_params
-        all_calls = await conn.fetch(query, *all_params)
+        rows = await conn.fetch(query, *all_params)
         
-        if not all_calls:
+        if not rows or rows[0]['total_sessions'] is None:
             return OverallVoiceStatsResponse(
                 start_date=start_date or None,
                 end_date=end_date or None,
@@ -728,90 +776,48 @@ async def get_overall_voice_stats(
                 voice_stats=[]
             )
         
-        # Convert to list of dicts for session grouping
-        calls_list = [dict(call) for call in all_calls]
+        # Get totals from first row (they're the same across all rows)
+        first_row = rows[0]
+        total_sessions = first_row['total_sessions']
+        null_voice_calls = first_row['null_voice_calls']
+        voiced_calls = first_row['voiced_calls']
+        voiced_transferred = first_row['voiced_transferred']
+        qualified_transferred = first_row['qualified_transferred']
+        non_qualified_transferred = voiced_transferred - qualified_transferred
         
-        # Group calls into sessions by campaign and number
-        calls_by_campaign = {}
-        for call in calls_list:
-            campaign_id = call['client_campaign_model_id']
-            if campaign_id not in calls_by_campaign:
-                calls_by_campaign[campaign_id] = []
-            calls_by_campaign[campaign_id].append(call)
-        
-        # Group sessions within each campaign, then combine
-        all_final_calls = []
-        for campaign_calls in calls_by_campaign.values():
-            campaign_sessions = group_calls_by_session(campaign_calls, duration_minutes=2)
-            for session in campaign_sessions:
-                session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
-                all_final_calls.append(session_sorted[-1])
-        
-        # Separate null voice calls from voiced calls
-        null_voice_calls = [call for call in all_final_calls if call['voice_name'] is None]
-        voiced_calls = [call for call in all_final_calls if call['voice_name'] is not None]
-        
-        # Aggregate by voice across all campaigns (only for non-null voices)
-        voice_data = {}
-        total_voiced_calls = len(voiced_calls)
-        total_voiced_transferred = 0
-        total_qualified_transferred = 0
-        
-        for call in voiced_calls:
-            voice_name = call['voice_name']
-            transferred = call['transferred'] or False
-            is_qualified = transferred and call['response_category'] == 'Qualified'
-            
-            if voice_name not in voice_data:
-                voice_data[voice_name] = {
-                    'total': 0,
-                    'transferred': 0,
-                    'qualified_transferred': 0
-                }
-            
-            voice_data[voice_name]['total'] += 1
-            if transferred:
-                voice_data[voice_name]['transferred'] += 1
-                total_voiced_transferred += 1
-                if is_qualified:
-                    voice_data[voice_name]['qualified_transferred'] += 1
-                    total_qualified_transferred += 1
-        
-        # Build voice stats list (only for non-null voices)
+        # Build voice stats list
         voice_stats = []
-        for voice_name in sorted(voice_data.keys()):
-            vdata = voice_data[voice_name]
-            non_qualified = vdata['transferred'] - vdata['qualified_transferred']
-            
-            voice_stats.append(VoiceOverallStats(
-                voice_name=voice_name,
-                total_calls=vdata['total'],
-                transferred_calls=vdata['transferred'],
-                transfer_rate=calculate_transfer_rate(vdata['transferred'], vdata['total']),
-                non_transferred_calls=vdata['total'] - vdata['transferred'],
-                qualified_transferred_calls=vdata['qualified_transferred'],
-                qualified_transfer_rate=calculate_qualified_rate(vdata['qualified_transferred'], vdata['transferred']),
-                non_qualified_transferred_calls=non_qualified,
-                non_qualified_transfer_rate=calculate_qualified_rate(non_qualified, vdata['transferred'])
-            ))
-        
-        # Calculate overall stats
-        total_all_calls = len(all_final_calls)
-        null_voice_count = len(null_voice_calls)
-        total_non_qualified_transferred = total_voiced_transferred - total_qualified_transferred
+        for row in rows:
+            if row['voice_name'] is not None:
+                voice_total = row['voice_total_calls']
+                voice_transferred = row['voice_transferred_calls']
+                voice_qualified = row['voice_qualified_transferred']
+                voice_non_qualified = voice_transferred - voice_qualified
+                
+                voice_stats.append(VoiceOverallStats(
+                    voice_name=row['voice_name'],
+                    total_calls=voice_total,
+                    transferred_calls=voice_transferred,
+                    transfer_rate=calculate_transfer_rate(voice_transferred, voice_total),
+                    non_transferred_calls=voice_total - voice_transferred,
+                    qualified_transferred_calls=voice_qualified,
+                    qualified_transfer_rate=calculate_qualified_rate(voice_qualified, voice_transferred),
+                    non_qualified_transferred_calls=voice_non_qualified,
+                    non_qualified_transfer_rate=calculate_qualified_rate(voice_non_qualified, voice_transferred)
+                ))
         
         return OverallVoiceStatsResponse(
             start_date=start_date or None,
             end_date=end_date or None,
-            total_calls=total_voiced_calls,
-            total_transferred=total_voiced_transferred,
-            overall_transfer_rate=calculate_transfer_rate(total_voiced_transferred, total_voiced_calls),
-            qualified_transferred_calls=total_qualified_transferred,
-            qualified_transfer_rate=calculate_qualified_rate(total_qualified_transferred, total_voiced_transferred),
-            non_qualified_transferred_calls=total_non_qualified_transferred,
-            non_qualified_transfer_rate=calculate_qualified_rate(total_non_qualified_transferred, total_voiced_transferred),
-            null_voice_calls=null_voice_count,
-            null_voice_ratio=calculate_null_voice_ratio(null_voice_count, total_all_calls),
+            total_calls=voiced_calls,
+            total_transferred=voiced_transferred,
+            overall_transfer_rate=calculate_transfer_rate(voiced_transferred, voiced_calls),
+            qualified_transferred_calls=qualified_transferred,
+            qualified_transfer_rate=calculate_qualified_rate(qualified_transferred, voiced_transferred),
+            non_qualified_transferred_calls=non_qualified_transferred,
+            non_qualified_transfer_rate=calculate_qualified_rate(non_qualified_transferred, voiced_transferred),
+            null_voice_calls=null_voice_calls,
+            null_voice_ratio=calculate_null_voice_ratio(null_voice_calls, total_sessions),
             voice_stats=voice_stats
         )
 
