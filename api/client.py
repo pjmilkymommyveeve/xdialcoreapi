@@ -126,7 +126,28 @@ async def get_user_client_id(conn, user_id: int, roles: List[str]) -> Optional[i
 
 # ============== ENDPOINTS ==============
 
-
+@router.get("/all", response_model=List[Dict[str, Any]])
+async def get_all_clients(
+    user_info: Dict = Depends(require_roles(["admin", "onboarding", "qa"]))
+):
+    """
+    Get all clients with their basic information (id and name only).
+    Only accessible by admin, onboarding, and qa roles.
+    """
+    pool = await get_db()
+    
+    async with pool.acquire() as conn:
+        clients_query = """
+            SELECT client_id, name
+            FROM clients
+            ORDER BY name
+        """
+        clients = await conn.fetch(clients_query)
+        
+        return [
+            {"client_id": client['client_id'], "name": client['name']}
+            for client in clients
+        ]   
 
 @router.get("/employer", response_model=EmployerInfoResponse)
 async def get_client_member_employer(
