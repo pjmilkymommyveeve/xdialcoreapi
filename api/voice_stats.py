@@ -181,13 +181,26 @@ async def get_all_campaigns_transfer_stats(
     """
     pool = await get_db()
     async with pool.acquire() as conn:
-        # Build date filter first
+        # Build list of original category names that map to "Qualified"
+        qualified_originals = [orig for orig, combined in CLIENT_CATEGORY_MAPPING.items() 
+                              if combined == "Qualified"]
+        
+        # Build date filter - but we need to offset parameter numbers by 1 since $1 is qualified_originals
         date_where, date_params, param_count = await build_date_filter(start_date, end_date, start_time, end_time)
+        
+        # Adjust date_where parameter numbers to account for $1 being qualified_originals
+        adjusted_date_where = []
+        for clause in date_where:
+            # Replace $N with $(N+1)
+            adjusted_clause = clause
+            for i in range(param_count, 0, -1):  # Go backwards to avoid replacing $10 when looking for $1
+                adjusted_clause = adjusted_clause.replace(f'${i}', f'${i+1}')
+            adjusted_date_where.append(adjusted_clause)
         
         # Build campaign filter parameters
         campaign_where_parts = []
         campaign_params = []
-        current_param = param_count + 1
+        current_param = param_count + 2  # +1 for qualified_originals, +1 for next param after date params
         
         if client_id:
             campaign_where_parts.append(f"ccm.client_id = ${current_param}")
@@ -197,16 +210,11 @@ async def get_all_campaigns_transfer_stats(
         # Build the complete WHERE clause for campaigns
         campaign_filter = " AND ".join(campaign_where_parts) if campaign_where_parts else "1=1"
         
-        # Build list of original category names that map to "Qualified"
-        qualified_originals = [orig for orig, combined in CLIENT_CATEGORY_MAPPING.items() 
-                              if combined == "Qualified"]
+        # Build final params list: qualified_originals first, then date params, then campaign params
+        all_params = [qualified_originals] + date_params + campaign_params
         
-        # Build campaign filter parameters first (before adding qualified_originals)
-        all_params = campaign_params + date_params
-        
-        # Now determine the parameter position for qualified_originals
-        qualified_param_num = len(all_params) + 1
-        all_params.insert(0, qualified_originals)  # Add as first parameter
+        # Use adjusted date_where in the query
+        date_where = adjusted_date_where
         
         # Optimized query - all aggregations done in database
         query = f"""
