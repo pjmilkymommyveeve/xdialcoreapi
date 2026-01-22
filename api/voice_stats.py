@@ -9,6 +9,7 @@ import io
 from core.dependencies import require_roles
 from database.db import get_db
 from utils.call import group_calls_by_session
+from utils.mappings import CLIENT_CATEGORY_MAPPING
 
 router = APIRouter(prefix="/campaigns/stats", tags=["General Statistics"])
 
@@ -175,6 +176,8 @@ async def get_all_campaigns_transfer_stats(
     Only includes campaigns that are not Archived.
     
     Voices with NULL values are shown separately and not included in voice statistics.
+    
+    Uses CLIENT_CATEGORY_MAPPING to determine which categories are "Qualified".
     """
     pool = await get_db()
     async with pool.acquire() as conn:
@@ -193,6 +196,17 @@ async def get_all_campaigns_transfer_stats(
         
         # Build the complete WHERE clause for campaigns
         campaign_filter = " AND ".join(campaign_where_parts) if campaign_where_parts else "1=1"
+        
+        # Build list of original category names that map to "Qualified"
+        qualified_originals = [orig for orig, combined in CLIENT_CATEGORY_MAPPING.items() 
+                              if combined == "Qualified"]
+        
+        # Build campaign filter parameters first (before adding qualified_originals)
+        all_params = campaign_params + date_params
+        
+        # Now determine the parameter position for qualified_originals
+        qualified_param_num = len(all_params) + 1
+        all_params.insert(0, qualified_originals)  # Add as first parameter
         
         # Optimized query - all aggregations done in database
         query = f"""
@@ -270,7 +284,7 @@ async def get_all_campaigns_transfer_stats(
                     voice_name,
                     COUNT(*) as total_calls,
                     SUM(CASE WHEN transferred THEN 1 ELSE 0 END) as transferred_calls,
-                    SUM(CASE WHEN transferred AND response_category = 'Qualified' THEN 1 ELSE 0 END) as qualified_transferred_calls
+                    SUM(CASE WHEN transferred AND response_category = ANY($1::text[]) THEN 1 ELSE 0 END) as qualified_transferred_calls
                 FROM final_stages
                 WHERE voice_name IS NOT NULL
                 GROUP BY client_campaign_model_id, voice_name
@@ -282,7 +296,7 @@ async def get_all_campaigns_transfer_stats(
                     SUM(CASE WHEN voice_name IS NULL THEN 1 ELSE 0 END) as null_voice_calls,
                     SUM(CASE WHEN voice_name IS NOT NULL THEN 1 ELSE 0 END) as voiced_calls,
                     SUM(CASE WHEN voice_name IS NOT NULL AND transferred THEN 1 ELSE 0 END) as voiced_transferred,
-                    SUM(CASE WHEN voice_name IS NOT NULL AND transferred AND response_category = 'qualified' THEN 1 ELSE 0 END) as qualified_transferred
+                    SUM(CASE WHEN voice_name IS NOT NULL AND transferred AND response_category = ANY($1::text[]) THEN 1 ELSE 0 END) as qualified_transferred
                 FROM final_stages
                 GROUP BY client_campaign_model_id
             )
@@ -308,8 +322,6 @@ async def get_all_campaigns_transfer_stats(
             LEFT JOIN voice_stats vs ON ac.campaign_id = vs.campaign_id
             ORDER BY ac.campaign_id, vs.voice_name
         """
-        
-        all_params = campaign_params + date_params
         rows = await conn.fetch(query, *all_params)
         
         if not rows:
@@ -378,6 +390,7 @@ async def get_all_campaigns_transfer_stats(
             total_campaigns=len(campaigns_dict),
             campaigns=list(campaigns_dict.values())
         )
+    
 
 @router.get("/overall-voice-stats", response_model=OverallVoiceStatsResponse)
 async def get_overall_voice_stats(
