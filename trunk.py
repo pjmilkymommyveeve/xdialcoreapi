@@ -5,8 +5,8 @@ from core.settings import settings
 from database.db import init_db_pool, close_db_pool
 
 # import routers
-from api import auth, campaigns, export, integration, recordings, client, client_employees, server_stats, campaign_stats, call_lookup, voice_stats
-
+from api.stats import campaign_stats, server_stats, voice_stats, c
+from api import auth, campaign_metrics, export, integration, recordings, client, client_employees, call_lookup, response_categories
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -37,12 +37,13 @@ app.add_middleware(
 
 # include routers
 app.include_router(auth.router, prefix=settings.app.api_prefix)
-app.include_router(client_employees.router, prefix=settings.app.api_prefix)
 app.include_router(client.router, prefix=settings.app.api_prefix)
-app.include_router(campaigns.router, prefix=settings.app.api_prefix)
+app.include_router(client_employees.router, prefix=settings.app.api_prefix)
+app.include_router(campaign_metrics.router, prefix=settings.app.api_prefix)
 app.include_router(recordings.router, prefix=settings.app.api_prefix)
 app.include_router(export.router, prefix=settings.app.api_prefix)
 app.include_router(integration.router, prefix=settings.app.api_prefix)
+app.include_router(response_categories.router, prefix=settings.app.api_prefix)
 app.include_router(call_lookup.router, prefix=settings.app.api_prefix)
 app.include_router(voice_stats.router, prefix=settings.app.api_prefix)
 app.include_router(server_stats.router, prefix=settings.app.api_prefix)
