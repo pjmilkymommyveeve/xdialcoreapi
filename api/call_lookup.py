@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict
 from datetime import datetime, time
 import csv
+from typing import Optional
 import io
 
 from core.dependencies import require_roles
@@ -14,7 +15,7 @@ router = APIRouter(prefix="/campaigns/call-lookup", tags=["Call Lookup"])
 # ============== MODELS ==============
 
 class CallStageData(BaseModel):
-    stage: int
+    stage: Optional[int]
     transcription: Optional[str]
     response_category: Optional[str]
     voice_name: Optional[str]
