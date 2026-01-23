@@ -36,7 +36,6 @@ class CategoryCount(BaseModel):
     transferred_count: int
     original_name: str
 
-
 class CampaignInfo(BaseModel):
     id: int
     name: str
@@ -76,6 +75,21 @@ class CampaignDashboardResponse(BaseModel):
 
 # ============== ADMIN MODELS ==============
 
+class StageCategoryCount(BaseModel):
+    """Category count for a specific stage"""
+    stage: int
+    count: int
+    transferred_count: int
+
+
+class CategoryCountWithStages(BaseModel):
+    """Extended CategoryCount with stage-specific breakdowns"""
+    name: str
+    color: str
+    count: int
+    transferred_count: int
+    original_name: str
+    stage_counts: List[StageCategoryCount] = []
 
 class StageFilter(BaseModel):
     """Model for stage-specific category filters"""
@@ -111,7 +125,7 @@ class AdminCampaignDashboardResponse(BaseModel):
     campaign: CampaignInfo
     calls: List[DetailedCallRecord]
     total_calls: int
-    all_categories: List[CategoryCount]
+    all_categories: List[CategoryCountWithStages]
     filters: DashboardFilters
     pagination: PaginationInfo
 
@@ -479,6 +493,7 @@ async def get_client_campaign(
     
 # ============== ADMIN ENDPOINT ==============
 
+
 @router.get("/admin/{campaign_id}/dashboard", response_model=AdminCampaignDashboardResponse)
 async def get_admin_campaign_dashboard(
     campaign_id: int,
@@ -615,6 +630,9 @@ async def get_admin_campaign_dashboard(
         # Group calls into sessions (2-minute window)
         call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
         
+        # Store unfiltered sessions for category counting
+        unfiltered_sessions = call_sessions.copy()
+        
         # Apply stage-specific filters if provided
         if parsed_stage_filters:
             filtered_sessions = []
@@ -711,13 +729,37 @@ async def get_admin_campaign_dashboard(
         end_idx = start_idx + page_size
         paginated_sessions = call_sessions[start_idx:end_idx]
         
-        # Get all categories for the sidebar (count from ALL sessions before pagination)
+        # Get all categories for the sidebar
         all_categories_query = "SELECT id, name, color FROM response_categories ORDER BY name"
         db_categories = await conn.fetch(all_categories_query)
         
-        # Count categories from latest stage of each session
+        # Count categories from ALL calls in unfiltered sessions (for stage-specific counts)
+        # Structure: {combined_category: {stage: {count, transferred_count}}}
+        stage_category_counts = {}
+        
+        for session in unfiltered_sessions:
+            for call in session:
+                if call['category_name']:
+                    original_name = call['category_name']
+                    combined_name = ADMIN_CATEGORY_MAPPING.get(original_name, original_name)
+                    stage_num = call['stage'] or 0
+                    
+                    if combined_name not in stage_category_counts:
+                        stage_category_counts[combined_name] = {}
+                    
+                    if stage_num not in stage_category_counts[combined_name]:
+                        stage_category_counts[combined_name][stage_num] = {
+                            'count': 0,
+                            'transferred_count': 0
+                        }
+                    
+                    stage_category_counts[combined_name][stage_num]['count'] += 1
+                    if call.get('transferred'):
+                        stage_category_counts[combined_name][stage_num]['transferred_count'] += 1
+        
+        # Count categories from latest stage of each unfiltered session (for overall counts)
         category_counts_raw = {}
-        for session in call_sessions:  # Use all sessions for counts, not just paginated
+        for session in unfiltered_sessions:
             latest_call = sorted(session, key=lambda x: x['stage'] or 0)[-1]
             if latest_call['category_name']:
                 cat_name = latest_call['category_name']
@@ -756,12 +798,24 @@ async def get_admin_campaign_dashboard(
         
         all_categories = []
         for combined_name in sorted(combined_counts.keys()):
-            all_categories.append(CategoryCount(
+            # Build stage counts for this category
+            stage_counts_list = []
+            if combined_name in stage_category_counts:
+                for stage_num in sorted(stage_category_counts[combined_name].keys()):
+                    stage_data = stage_category_counts[combined_name][stage_num]
+                    stage_counts_list.append(StageCategoryCount(
+                        stage=stage_num,
+                        count=stage_data['count'],
+                        transferred_count=stage_data['transferred_count']
+                    ))
+            
+            all_categories.append(CategoryCountWithStages(
                 name=combined_name,
                 color=category_colors.get(combined_name, '#6B7280'),
                 count=combined_counts[combined_name],
                 transferred_count=combined_transferred_counts[combined_name],
-                original_name=combined_name
+                original_name=combined_name,
+                stage_counts=stage_counts_list
             ))
         
         # Format detailed calls (only paginated sessions)
