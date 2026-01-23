@@ -5,7 +5,7 @@ from core.settings import settings
 from database.db import init_db_pool, close_db_pool
 
 # import routers
-from api.stats import campaign_stats, server_stats, voice_stats, c
+from api.stats import campaign_stats, server_stats, voice_stats
 from api import auth, campaign_metrics, export, integration, recordings, client, client_employees, call_lookup, response_categories
 
 @asynccontextmanager
