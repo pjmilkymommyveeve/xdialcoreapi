@@ -253,7 +253,7 @@ async def get_client_campaign(
     roles = user_info['roles']
     
     is_privileged = any(role in PRIVILEGED_ROLES for role in roles)
-    allowed_statuses = ['Enabled', 'Testing','Disabled'] if is_privileged else ['Enabled', 'Testing']
+    allowed_statuses = ['Enabled', 'Testing']
     
     pool = await get_db()
     
@@ -907,7 +907,7 @@ async def get_transfer_metrics(
     roles = user_info['roles']
     
     is_privileged = any(role in PRIVILEGED_ROLES for role in roles)
-    allowed_statuses = ['Enabled', 'Testing', 'Disabled'] if is_privileged else ['Enabled', 'Testing']
+    allowed_statuses = ['Enabled', 'Testing']
     
     pool = await get_db()
     
