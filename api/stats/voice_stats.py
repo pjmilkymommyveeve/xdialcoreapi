@@ -597,4 +597,3 @@ async def get_overall_voice_stats(
             null_voice_ratio=calculate_null_voice_ratio(null_voice_calls, total_sessions),
             voice_stats=voice_stats
         )
-

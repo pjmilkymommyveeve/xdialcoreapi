@@ -9,6 +9,7 @@ import io
 
 from core.dependencies import require_roles
 from database.db import get_db
+from utils.call import group_calls_by_session
 
 router = APIRouter(prefix="/campaigns/call-lookup", tags=["Call Lookup"])
 
@@ -32,6 +33,8 @@ class CallLookupResult(BaseModel):
     final_response_category: Optional[str]
     final_decision_transferred: bool
     total_stages: int
+    first_timestamp: datetime
+    last_timestamp: datetime
 
 class CallLookupResponse(BaseModel):
     total_numbers_searched: int
@@ -143,57 +146,64 @@ async def fetch_call_data(
         JOIN campaigns ca ON cm.campaign_id = ca.id
         JOIN models m ON cm.model_id = m.id
         WHERE {where_clause}
-        ORDER BY c.number, c.stage
+        ORDER BY c.number, c.timestamp, c.stage
     """
     
     rows = await conn.fetch(query, *params)
     
-    # Group by number
-    calls_by_number = {}
-    for row in rows:
-        number = row['number']
-        if number not in calls_by_number:
-            calls_by_number[number] = {
-                'campaign_id': row['client_campaign_model_id'],
-                'campaign_name': row['campaign_name'],
-                'model_name': row['model_name'],
-                'client_name': row['client_name'],
-                'stages': []
-            }
-        
-        calls_by_number[number]['stages'].append(CallStageData(
-            stage=row['stage'],
-            transcription=row['transcription'],
-            response_category=row['response_category'],
-            voice_name=row['voice_name'],
-            transferred=row['transferred'],
-            timestamp=row['timestamp']
-        ))
+    # Convert to list of dicts
+    calls_list = [dict(row) for row in rows]
     
-    # Build results
+    # Group calls into sessions (2-minute window)
+    call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
+    
+    # Build results from sessions
     results = []
     found_numbers = set()
     
-    for number in numbers:
-        if number in calls_by_number:
-            found_numbers.add(number)
-            call_data = calls_by_number[number]
-            stages = call_data['stages']
+    for session in call_sessions:
+        if not session:
+            continue
             
-            # Get final stage data
-            final_stage = stages[-1] if stages else None
-            
-            results.append(CallLookupResult(
-                number=number,
-                campaign_id=call_data['campaign_id'],
-                campaign_name=call_data['campaign_name'],
-                model_name=call_data['model_name'],
-                client_name=call_data['client_name'],
-                stages=stages,
-                final_response_category=final_stage.response_category if final_stage else None,
-                final_decision_transferred=final_stage.transferred if final_stage else False,
-                total_stages=len(stages)
+        # All calls in a session have the same number
+        number = session[0]['number']
+        found_numbers.add(number)
+        
+        # Sort stages within the session
+        session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
+        
+        # Get session metadata
+        first_call = min(session, key=lambda x: x['timestamp'])
+        last_call = max(session, key=lambda x: x['timestamp'])
+        
+        # Build stage data
+        stages = []
+        for call in session_sorted:
+            stages.append(CallStageData(
+                stage=call['stage'],
+                transcription=call['transcription'],
+                response_category=call['response_category'],
+                voice_name=call['voice_name'],
+                transferred=call['transferred'],
+                timestamp=call['timestamp']
             ))
+        
+        # Get final stage data
+        final_stage = session_sorted[-1]
+        
+        results.append(CallLookupResult(
+            number=number,
+            campaign_id=session[0]['client_campaign_model_id'],
+            campaign_name=session[0]['campaign_name'],
+            model_name=session[0]['model_name'],
+            client_name=session[0]['client_name'],
+            stages=stages,
+            final_response_category=final_stage['response_category'],
+            final_decision_transferred=final_stage['transferred'],
+            total_stages=len(stages),
+            first_timestamp=first_call['timestamp'],
+            last_timestamp=last_call['timestamp']
+        ))
     
     # Get numbers not found
     not_found = [num for num in numbers if num not in found_numbers]
@@ -223,6 +233,8 @@ def generate_csv_output(
         'Campaign Name',
         'Model Name',
         'Total Stages',
+        'First Timestamp',
+        'Last Timestamp',
         'Stage',
         'Transcription',
         'Response Category',
@@ -242,6 +254,8 @@ def generate_csv_output(
                 result.campaign_name,
                 result.model_name,
                 result.total_stages,
+                result.first_timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+                result.last_timestamp.strftime('%Y-%m-%d %H:%M:%S'),
                 stage.stage,
                 stage.transcription or '',
                 stage.response_category or '',
@@ -281,6 +295,9 @@ async def lookup_calls_json(
     - Voice used at each stage
     - Transfer status at each stage
     - Final response category and decision
+    
+    Calls are automatically grouped into sessions using a 2-minute window.
+    Multiple calls to the same number are grouped if they occur within 2 minutes of each other.
     
     Optional Filters:
     - client_id: Filter calls by specific client
@@ -350,6 +367,9 @@ async def lookup_calls_csv(
     - Voice used at each stage
     - Transfer status at each stage
     - Final response category and decision
+    
+    Calls are automatically grouped into sessions using a 2-minute window.
+    Multiple calls to the same number are grouped if they occur within 2 minutes of each other.
     
     Optional Filters:
     - client_id: Filter calls by specific client

@@ -80,6 +80,8 @@ async def get_all_campaigns_stats(
     - status_name: Filter by status name
     
     A campaign is considered "active" if it has had calls in the last 1 minute.
+    
+    Note: Excludes campaigns with "Archived" status.
     """
     pool = await get_db()
     
@@ -159,7 +161,9 @@ async def get_all_campaigns_stats(
             LEFT JOIN server_campaign_bots scb ON ccm.id = scb.client_campaign_model_id
             LEFT JOIN servers s ON scb.server_id = s.id
             LEFT JOIN extensions e ON scb.extension_id = e.id
-            WHERE 1=1 {where_clause}
+            WHERE 1=1 
+                AND (sh.id IS NULL OR st.status_name != 'Archived')
+                {where_clause}
             ORDER BY ccm.id, s.id, e.extension_number
         """
         
@@ -278,6 +282,8 @@ async def get_campaign_stats_by_id(
     - Server and extension groupings
     - Activity status
     - Current status and settings
+    
+    Note: Returns 404 if campaign is archived.
     """
     pool = await get_db()
     
@@ -330,6 +336,7 @@ async def get_campaign_stats_by_id(
             LEFT JOIN servers s ON scb.server_id = s.id
             LEFT JOIN extensions e ON scb.extension_id = e.id
             WHERE ccm.id = $2
+                AND (sh.id IS NULL OR st.status_name != 'Archived')
             ORDER BY s.id, e.extension_number
         """
         
@@ -338,7 +345,7 @@ async def get_campaign_stats_by_id(
         if not rows:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Campaign with ID {campaign_id} not found"
+                detail=f"Campaign with ID {campaign_id} not found or is archived"
             )
         
         # Build campaign data from rows
@@ -385,6 +392,8 @@ async def get_campaigns_by_client(
     ADMIN: GET ALL CAMPAIGNS FOR A SPECIFIC CLIENT
     
     Shows all campaigns belonging to a specific client with full details.
+    
+    Note: Excludes campaigns with "Archived" status.
     """
     return await get_all_campaigns_stats(
         user_info=user_info,

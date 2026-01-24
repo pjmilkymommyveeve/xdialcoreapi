@@ -104,6 +104,8 @@ async def get_all_servers_stats(
     
     A campaign is considered "active" if it has had calls in the last 1 minute.
     Active bots are counted only for active campaigns.
+    
+    Note: Excludes campaigns with "Archived" status.
     """
     pool = await get_db()
     
@@ -169,7 +171,9 @@ async def get_all_servers_stats(
             LEFT JOIN status_history sh ON ccm.id = sh.client_campaign_id AND sh.end_date IS NULL
             LEFT JOIN status st ON sh.status_id = st.id
             LEFT JOIN campaign_activity ca_data ON ccm.id = ca_data.client_campaign_model_id
-            WHERE 1=1 {where_clause}
+            WHERE 1=1 
+                AND (sh.id IS NULL OR st.status_name != 'Archived')
+                {where_clause}
             ORDER BY s.id, cl.name, ca.name, m.name
         """
         
@@ -299,6 +303,8 @@ async def get_campaign_server_distribution(
     Filters:
     - client_id: Show only campaigns for a specific client
     - active_only: Show only campaigns that are currently active
+    
+    Note: Excludes campaigns with "Archived" status.
     """
     pool = await get_db()
     
@@ -353,7 +359,9 @@ async def get_campaign_server_distribution(
             JOIN server_campaign_bots scb ON ccm.id = scb.client_campaign_model_id
             JOIN servers s ON scb.server_id = s.id
             JOIN extensions e ON scb.extension_id = e.id
-            WHERE 1=1 {where_clause}
+            WHERE 1=1 
+                AND (sh.id IS NULL OR st.status_name != 'Archived')
+                {where_clause}
             ORDER BY ccm.id, s.id
         """
         
