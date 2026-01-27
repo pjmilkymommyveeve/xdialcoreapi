@@ -2,14 +2,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from io import StringIO
 import csv
 from core.dependencies import require_roles
 from database.db import get_db
-
-from utils.call import group_calls_by_session
 from utils.mappings import CLIENT_CATEGORY_MAPPING
+from utils.call import group_calls_by_call_id
 
 router = APIRouter(prefix="/export", tags=["Data Export"])
 
@@ -208,26 +207,34 @@ async def get_export_options(
         
         # Get filtered calls
         filtered_calls_query = f"""
-            SELECT c.number, c.stage, c.timestamp, c.transferred,
+            SELECT c.id, c.call_id, c.number, c.stage, c.timestamp, c.transferred,
                    rc.name as category_name, rc.color as category_color
             FROM calls c
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             WHERE {' AND '.join(where_clauses)}
-            ORDER BY c.number, c.timestamp
+            ORDER BY c.call_id, c.timestamp
         """
         filtered_calls = await conn.fetch(filtered_calls_query, *params)
         
         # Convert to list of dicts for processing
         calls_list = [dict(call) for call in filtered_calls]
         
-        # Group by 2-minute sessions - NOW RETURNS List[List[dict]]
-        call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
+        # Separate calls with and without call_id
+        calls_with_id = [c for c in calls_list if c.get('call_id') is not None]
+        calls_without_id = [c for c in calls_list if c.get('call_id') is None]
         
-        # Get latest stage per session
+        # Group calls with call_id using the utility function
+        grouped = group_calls_by_call_id(calls_with_id)
+        
+        # Get the call with the highest stage for each call_id
         latest_stage_calls = []
-        for session in call_sessions:
-            session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
-            latest_stage_calls.append(session_sorted[-1])
+        for call_id, calls in grouped.items():
+            # Sort by stage (treating None as 0) and get the last one
+            sorted_calls = sorted(calls, key=lambda x: x.get('stage') or 0)
+            latest_stage_calls.append(sorted_calls[-1])
+        
+        # Add calls without call_id as separate sessions
+        latest_stage_calls.extend(calls_without_id)
         
         # Get all categories from database that are in the mapping
         categories_query = "SELECT id, name, color FROM response_categories ORDER BY name"
@@ -382,28 +389,36 @@ async def download_export(
         
         # Fetch calls
         calls_query = f"""
-            SELECT c.id, c.number, c.list_id, c.timestamp, c.stage,
+            SELECT c.id, c.call_id, c.number, c.list_id, c.timestamp, c.stage,
                    c.transferred, c.transcription,
                    rc.name as category_name, v.name as voice_name
             FROM calls c
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             LEFT JOIN voices v ON c.voice_id = v.id
             WHERE {' AND '.join(where_clauses)}
-            ORDER BY c.number, c.timestamp
+            ORDER BY c.call_id, c.timestamp
         """
         all_calls = await conn.fetch(calls_query, *params)
         
         # Convert to list of dicts
         calls_list = [dict(call) for call in all_calls]
         
-        # Group by 2-minute sessions - NOW RETURNS List[List[dict]]
-        call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
+        # Separate calls with and without call_id
+        calls_with_id = [c for c in calls_list if c.get('call_id') is not None]
+        calls_without_id = [c for c in calls_list if c.get('call_id') is None]
         
-        # Get latest stage per session
+        # Group calls with call_id using the utility function
+        grouped = group_calls_by_call_id(calls_with_id)
+        
+        # Get the call with the highest stage for each call_id
         filtered_calls = []
-        for session in call_sessions:
-            session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
-            filtered_calls.append(session_sorted[-1])
+        for call_id, calls in grouped.items():
+            # Sort by stage (treating None as 0) and get the last one
+            sorted_calls = sorted(calls, key=lambda x: x.get('stage') or 0)
+            filtered_calls.append(sorted_calls[-1])
+        
+        # Add calls without call_id as separate sessions
+        filtered_calls.extend(calls_without_id)
         
         # Filter out categories not in mapping
         filtered_calls = [
@@ -428,7 +443,7 @@ async def download_export(
             combined_category = resolve_export_category(original_category, call)
             
             writer.writerow([
-                call['id'],
+                call['call_id'] or call['id'],  # Use call_id if available, otherwise fall back to id
                 call['number'],
                 call['list_id'] or '',
                 combined_category,

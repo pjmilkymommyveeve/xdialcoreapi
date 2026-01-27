@@ -4,11 +4,11 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict
 from datetime import datetime, time
 import csv
-from typing import Optional
 import io
 
 from core.dependencies import require_roles
 from database.db import get_db
+from utils.call import group_calls_by_call_id
 
 router = APIRouter(prefix="/campaigns/call-lookup", tags=["Call Lookup"])
 
@@ -24,6 +24,7 @@ class CallStageData(BaseModel):
 
 class CallLookupResult(BaseModel):
     number: str
+    call_id: Optional[int]
     campaign_id: int
     campaign_name: str
     model_name: str
@@ -124,6 +125,7 @@ async def fetch_call_data(
     query = f"""
         SELECT 
             c.number,
+            c.call_id,
             c.stage,
             c.transcription,
             c.transferred,
@@ -143,57 +145,89 @@ async def fetch_call_data(
         JOIN campaigns ca ON cm.campaign_id = ca.id
         JOIN models m ON cm.model_id = m.id
         WHERE {where_clause}
-        ORDER BY c.number, c.stage
+        ORDER BY c.number, c.call_id, c.stage
     """
     
     rows = await conn.fetch(query, *params)
     
-    # Group by number
-    calls_by_number = {}
-    for row in rows:
-        number = row['number']
-        if number not in calls_by_number:
-            calls_by_number[number] = {
-                'campaign_id': row['client_campaign_model_id'],
-                'campaign_name': row['campaign_name'],
-                'model_name': row['model_name'],
-                'client_name': row['client_name'],
-                'stages': []
-            }
-        
-        calls_by_number[number]['stages'].append(CallStageData(
-            stage=row['stage'],
-            transcription=row['transcription'],
-            response_category=row['response_category'],
-            voice_name=row['voice_name'],
-            transferred=row['transferred'],
-            timestamp=row['timestamp']
-        ))
+    # Convert rows to list of dicts
+    all_calls = [dict(row) for row in rows]
+    
+    # Separate calls with and without call_id
+    calls_with_id = [c for c in all_calls if c.get('call_id') is not None]
+    calls_without_id = [c for c in all_calls if c.get('call_id') is None]
+    
+    # Group calls with call_id using the utility function
+    grouped_calls = group_calls_by_call_id(calls_with_id)
     
     # Build results
     results = []
     found_numbers = set()
     
-    for number in numbers:
-        if number in calls_by_number:
-            found_numbers.add(number)
-            call_data = calls_by_number[number]
-            stages = call_data['stages']
+    # Process grouped calls (with call_id)
+    for call_id, call_list in grouped_calls.items():
+        if not call_list:
+            continue
             
-            # Get final stage data
-            final_stage = stages[-1] if stages else None
-            
-            results.append(CallLookupResult(
-                number=number,
-                campaign_id=call_data['campaign_id'],
-                campaign_name=call_data['campaign_name'],
-                model_name=call_data['model_name'],
-                client_name=call_data['client_name'],
-                stages=stages,
-                final_response_category=final_stage.response_category if final_stage else None,
-                final_decision_transferred=final_stage.transferred if final_stage else False,
-                total_stages=len(stages)
+        # All calls in this group have the same number and campaign info
+        first_call = call_list[0]
+        number = first_call['number']
+        found_numbers.add(number)
+        
+        # Build stage data for all stages in this call session
+        stages = []
+        for call in call_list:
+            stages.append(CallStageData(
+                stage=call['stage'],
+                transcription=call['transcription'],
+                response_category=call['response_category'],
+                voice_name=call['voice_name'],
+                transferred=call['transferred'],
+                timestamp=call['timestamp']
             ))
+        
+        # Get final stage data (highest stage)
+        final_stage = max(stages, key=lambda s: s.stage or 0) if stages else None
+        
+        results.append(CallLookupResult(
+            number=number,
+            call_id=call_id,
+            campaign_id=first_call['client_campaign_model_id'],
+            campaign_name=first_call['campaign_name'],
+            model_name=first_call['model_name'],
+            client_name=first_call['client_name'],
+            stages=sorted(stages, key=lambda s: s.stage or 0),
+            final_response_category=final_stage.response_category if final_stage else None,
+            final_decision_transferred=final_stage.transferred if final_stage else False,
+            total_stages=len(stages)
+        ))
+    
+    # Process calls without call_id (each is treated as separate session)
+    for call in calls_without_id:
+        number = call['number']
+        found_numbers.add(number)
+        
+        stage_data = CallStageData(
+            stage=call['stage'],
+            transcription=call['transcription'],
+            response_category=call['response_category'],
+            voice_name=call['voice_name'],
+            transferred=call['transferred'],
+            timestamp=call['timestamp']
+        )
+        
+        results.append(CallLookupResult(
+            number=number,
+            call_id=None,
+            campaign_id=call['client_campaign_model_id'],
+            campaign_name=call['campaign_name'],
+            model_name=call['model_name'],
+            client_name=call['client_name'],
+            stages=[stage_data],
+            final_response_category=call['response_category'],
+            final_decision_transferred=call['transferred'],
+            total_stages=1
+        ))
     
     # Get numbers not found
     not_found = [num for num in numbers if num not in found_numbers]
@@ -219,6 +253,7 @@ def generate_csv_output(
     # Write header
     writer.writerow([
         'Number',
+        'Call ID',
         'Client Name',
         'Campaign Name',
         'Model Name',
@@ -238,6 +273,7 @@ def generate_csv_output(
         for stage in result.stages:
             writer.writerow([
                 result.number,
+                result.call_id or 'N/A',
                 result.client_name,
                 result.campaign_name,
                 result.model_name,
@@ -276,11 +312,15 @@ async def lookup_calls_json(
     
     Upload a CSV file containing phone numbers (comma-separated or one per line).
     Returns detailed call data for all stages of each number including:
+    - Call ID (groups related calls)
     - Transcription at each stage
     - Response category at each stage
     - Voice used at each stage
     - Transfer status at each stage
     - Final response category and decision
+    
+    Note: A single phone number may have multiple call_ids (multiple call sessions).
+    Each call_id represents a separate call session to that number.
     
     Optional Filters:
     - client_id: Filter calls by specific client
@@ -325,7 +365,7 @@ async def lookup_calls_json(
     
     return CallLookupResponse(
         total_numbers_searched=len(numbers),
-        numbers_found=len(results),
+        numbers_found=len(set(r.number for r in results)),  # Count unique numbers, not call_ids
         numbers_not_found=len(not_found),
         results=results,
         not_found_numbers=not_found,
@@ -345,11 +385,15 @@ async def lookup_calls_csv(
     
     Upload a CSV file containing phone numbers (comma-separated or one per line).
     Returns detailed call data for all stages of each number including:
+    - Call ID (groups related calls)
     - Transcription at each stage
     - Response category at each stage
     - Voice used at each stage
     - Transfer status at each stage
     - Final response category and decision
+    
+    Note: A single phone number may have multiple call_ids (multiple call sessions).
+    Each call_id represents a separate call session to that number.
     
     Optional Filters:
     - client_id: Filter calls by specific client

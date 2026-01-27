@@ -6,19 +6,16 @@ from core.dependencies import require_roles
 from database.db import get_db
 from zoneinfo import ZoneInfo
 
-from utils.call import group_calls_by_session
 from utils.mappings import CLIENT_CATEGORY_MAPPING, ADMIN_CATEGORY_MAPPING
-
+from utils.call import group_calls_by_call_id
 router = APIRouter(prefix="/campaigns", tags=["Campaigns"])
-
-
-
 
 
 # ============== CLIENT MODELS ==============
 
 class CallRecord(BaseModel):
     id: int
+    call_id: int
     number: str
     list_id: str
     category: str
@@ -107,6 +104,7 @@ class CallStageDetail(BaseModel):
 
 class DetailedCallRecord(BaseModel):
     id: int
+    call_id: int
     number: str
     list_id: str
     latest_category: str
@@ -267,7 +265,7 @@ async def get_client_campaign(
             end_date = today.strftime('%Y-%m-%d')
         
         # Build base query WITHOUT category filter for counting all categories
-        base_where_clauses = ["c.client_campaign_model_id = $1"]
+        base_where_clauses = ["c.client_campaign_model_id = $1", "c.call_id IS NOT NULL"]
         base_params = [campaign_id]
         base_param_count = 1
         
@@ -309,21 +307,22 @@ async def get_client_campaign(
         
         # Query for category counts (without category filter)
         base_calls_query = f"""
-            SELECT c.id, c.number, c.list_id, c.timestamp, c.stage, c.transferred,
+            SELECT c.id, c.call_id, c.number, c.list_id, c.timestamp, c.stage, c.transferred,
                    c.transcription, rc.name as category_name, rc.color as category_color,
                    v.name as voice_name
             FROM calls c
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             LEFT JOIN voices v ON c.voice_id = v.id
             WHERE {' AND '.join(base_where_clauses)}
-            ORDER BY c.number, c.timestamp, c.stage
+            ORDER BY c.call_id, c.stage
         """
         base_calls = await conn.fetch(base_calls_query, *base_params)
         base_calls_list = [dict(call) for call in base_calls]
-        base_call_sessions = group_calls_by_session(base_calls_list, duration_minutes=2)
         
+        # Group by call_id and get latest stage
+        base_call_sessions = group_calls_by_call_id(base_calls_list)
         base_latest_calls = []
-        for session in base_call_sessions:
+        for call_id, session in base_call_sessions.items():
             session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
             base_latest_calls.append(session_sorted[-1])
         
@@ -353,21 +352,22 @@ async def get_client_campaign(
         
         # Query for filtered calls (with category filter if applied)
         calls_query = f"""
-            SELECT c.id, c.number, c.list_id, c.timestamp, c.stage, c.transferred,
+            SELECT c.id, c.call_id, c.number, c.list_id, c.timestamp, c.stage, c.transferred,
                    c.transcription, rc.name as category_name, rc.color as category_color,
                    v.name as voice_name
             FROM calls c
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             LEFT JOIN voices v ON c.voice_id = v.id
             WHERE {' AND '.join(where_clauses)}
-            ORDER BY c.number, c.timestamp, c.stage
+            ORDER BY c.call_id, c.stage
         """
         all_calls = await conn.fetch(calls_query, *params)
         calls_list = [dict(call) for call in all_calls]
-        call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
         
+        # Group by call_id and get latest stage
+        call_sessions = group_calls_by_call_id(calls_list)
         latest_calls = []
-        for session in call_sessions:
+        for call_id, session in call_sessions.items():
             session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
             latest_calls.append(session_sorted[-1])
         
@@ -384,53 +384,33 @@ async def get_client_campaign(
         all_categories_query = "SELECT id, name, color FROM response_categories ORDER BY name"
         db_categories = await conn.fetch(all_categories_query)
         
-        mapped_categories = []
-        for db_cat in db_categories:
-            original_name = db_cat['name'] or 'UNKNOWN'
-            if original_name in CLIENT_CATEGORY_MAPPING and CLIENT_CATEGORY_MAPPING[original_name] != "":
-                mapped_categories.append(db_cat)
+        # Build combined category counts structure
+        combined_counts = {}
+        combined_transferred_counts = {}
+        category_colors = {}
         
-        category_counts_raw = {}
+        # Process all base calls to count categories
         for call in base_latest_calls:
             if call['category_name']:
                 cat_name = call['category_name']
                 # Use the resolver function
                 resolved_category = resolve_client_category(cat_name, call)
                 
-                if resolved_category != "":  # Skip empty mappings
-                    if cat_name not in category_counts_raw:
-                        category_counts_raw[cat_name] = {
-                            'name': cat_name,
-                            'color': call['category_color'] or '#6B7280',
-                            'count': 0,
-                            'transferred_count': 0,
-                            'resolved_category': resolved_category
-                        }
-                    category_counts_raw[cat_name]['count'] += 1
-                    if call.get('transferred'):
-                        category_counts_raw[cat_name]['transferred_count'] += 1
+                # Skip empty mappings
+                if resolved_category == "":
+                    continue
+                
+                # Initialize if this is the first time we see this combined category
+                if resolved_category not in combined_counts:
+                    combined_counts[resolved_category] = 0
+                    combined_transferred_counts[resolved_category] = 0
+                    category_colors[resolved_category] = call['category_color'] or '#6B7280'
+                
+                combined_counts[resolved_category] += 1
+                if call.get('transferred'):
+                    combined_transferred_counts[resolved_category] += 1
         
-        combined_counts = {}
-        combined_transferred_counts = {}
-        category_colors = {}
-        
-        for db_cat in mapped_categories:
-            original_name = db_cat['name'] or 'UNKNOWN'
-            # Use resolver to get the actual combined name
-            combined_name = resolve_client_category(original_name, {})  # Empty dict for static mapping
-            
-            if combined_name not in combined_counts:
-                combined_counts[combined_name] = 0
-                combined_transferred_counts[combined_name] = 0
-                category_colors[combined_name] = db_cat['color'] or '#6B7280'
-        
-        for cat_data in category_counts_raw.values():
-            resolved_name = cat_data['resolved_category']
-            combined_counts[resolved_name] += cat_data['count']
-            combined_transferred_counts[resolved_name] += cat_data['transferred_count']
-            if not category_colors.get(resolved_name):
-                category_colors[resolved_name] = cat_data['color']
-        
+        # Build final category list
         all_categories = []
         for combined_name in sorted(combined_counts.keys()):
             all_categories.append(CategoryCount(
@@ -441,6 +421,7 @@ async def get_client_campaign(
                 original_name=combined_name
             ))
         
+        # Format paginated calls
         calls_data = []
         for call in paginated_calls:
             original_category = call['category_name'] or 'Unknown'
@@ -449,6 +430,7 @@ async def get_client_campaign(
             
             calls_data.append(CallRecord(
                 id=call['id'],
+                call_id=call['call_id'],
                 number=call['number'],
                 list_id=call['list_id'] or 'N/A',
                 category=combined_category,
@@ -489,8 +471,7 @@ async def get_client_campaign(
                 has_next=page < total_pages,
                 has_prev=page > 1
             )
-        )
-    
+        )    
 # ============== ADMIN ENDPOINT ==============
 
 
@@ -571,7 +552,7 @@ async def get_admin_campaign_dashboard(
             end_date = today.strftime('%Y-%m-%d')
         
         # Build base query (without category filters - we'll filter in Python for efficiency)
-        where_clauses = ["c.client_campaign_model_id = $1"]
+        where_clauses = ["c.client_campaign_model_id = $1", "c.call_id IS NOT NULL"]
         params = [campaign_id]
         param_count = 1
         
@@ -613,22 +594,23 @@ async def get_admin_campaign_dashboard(
         
         # Fetch all calls (no category filter in SQL for better performance with stage filters)
         calls_query = f"""
-            SELECT c.id, c.number, c.list_id, c.timestamp, c.stage, c.transferred,
+            SELECT c.id, c.call_id, c.number, c.list_id, c.timestamp, c.stage, c.transferred,
                    c.transcription, rc.name as category_name, rc.color as category_color,
                    v.name as voice_name
             FROM calls c
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             LEFT JOIN voices v ON c.voice_id = v.id
             WHERE {' AND '.join(where_clauses)}
-            ORDER BY c.number, c.timestamp, c.stage
+            ORDER BY c.call_id, c.stage
         """
         all_calls = await conn.fetch(calls_query, *params)
         
         # Convert to list of dicts for grouping
         calls_list = [dict(call) for call in all_calls]
         
-        # Group calls into sessions (2-minute window)
-        call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
+        # Group calls by call_id (each call_id is a unique session)
+        call_sessions_dict = group_calls_by_call_id(calls_list)
+        call_sessions = list(call_sessions_dict.values())
         
         # Store unfiltered sessions for category counting
         unfiltered_sessions = call_sessions.copy()
@@ -845,6 +827,7 @@ async def get_admin_campaign_dashboard(
             
             calls_data.append(DetailedCallRecord(
                 id=latest_call['id'],
+                call_id=latest_call['call_id'],
                 number=latest_call['number'],
                 list_id=latest_call['list_id'] or 'N/A',
                 latest_category=combined_category,
@@ -922,7 +905,7 @@ async def get_transfer_metrics(
             end_date = today.strftime('%Y-%m-%d')
         
         # Build query with filters
-        where_clauses = ["c.client_campaign_model_id = $1"]
+        where_clauses = ["c.client_campaign_model_id = $1", "c.call_id IS NOT NULL"]
         params = [campaign_id]
         param_count = 1
         
@@ -953,24 +936,24 @@ async def get_transfer_metrics(
                 pass
         
         calls_query = f"""
-            SELECT c.id, c.number, c.timestamp, c.stage, c.transferred,
+            SELECT c.id, c.call_id, c.number, c.timestamp, c.stage, c.transferred,
                    rc.name as category_name
             FROM calls c
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             WHERE {' AND '.join(where_clauses)}
-            ORDER BY c.number, c.timestamp, c.stage
+            ORDER BY c.call_id, c.stage
         """
         all_calls = await conn.fetch(calls_query, *params)
         
         # Convert to list of dicts for grouping
         calls_list = [dict(call) for call in all_calls]
         
-        # Group calls into sessions (2-minute window)
-        call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
+        # Group calls by call_id
+        call_sessions = group_calls_by_call_id(calls_list)
         
         # Get latest stage from each session
         latest_calls = []
-        for session in call_sessions:
+        for call_id, session in call_sessions.items():
             session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
             latest_calls.append(session_sorted[-1])
         
@@ -978,10 +961,6 @@ async def get_transfer_metrics(
         a_grade_transfers = 0
         b_grade_transfers = 0
         drop_offs = 0
-        
-        # Map "qualified" category original names
-        qualified_originals = [orig for orig, combined in CLIENT_CATEGORY_MAPPING.items() 
-                              if combined == "Qualified"]
         
         for call in latest_calls:
             original_category = call['category_name'] or ''
@@ -1087,6 +1066,7 @@ async def get_category_timeseries(
         calls_query = """
             SELECT 
                 c.id, 
+                c.call_id,
                 c.number, 
                 c.timestamp, 
                 c.stage, 
@@ -1096,21 +1076,22 @@ async def get_category_timeseries(
             FROM calls c
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             WHERE c.client_campaign_model_id = $1
+                AND c.call_id IS NOT NULL
                 AND c.timestamp >= $2
                 AND c.timestamp <= $3
-            ORDER BY c.number, c.timestamp, c.stage
+            ORDER BY c.call_id, c.stage
         """
         all_calls = await conn.fetch(calls_query, campaign_id, start_dt, end_dt)
         
         # Convert to list of dicts for session grouping
         calls_list = [dict(call) for call in all_calls]
         
-        # Group calls into sessions (2-minute window between calls of same number)
-        call_sessions = group_calls_by_session(calls_list, duration_minutes=2)
+        # Group calls by call_id
+        call_sessions = group_calls_by_call_id(calls_list)
         
         # Extract latest stage from each session (this represents the final outcome)
         latest_calls = []
-        for session in call_sessions:
+        for call_id, session in call_sessions.items():
             session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
             latest_call = session_sorted[-1]
             latest_calls.append(latest_call)
