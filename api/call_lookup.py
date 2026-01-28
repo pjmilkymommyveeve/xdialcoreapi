@@ -44,6 +44,10 @@ class CallLookupResponse(BaseModel):
 
 # ============== HELPER FUNCTIONS ==============
 
+def normalize_phone_number(number: str) -> str:
+    """Remove all non-digit characters from phone number"""
+    return ''.join(filter(str.isdigit, number))
+
 def parse_csv_numbers(content: bytes) -> List[str]:
     """Parse CSV file and extract numbers"""
     try:
@@ -53,14 +57,14 @@ def parse_csv_numbers(content: bytes) -> List[str]:
         
         for row in reader:
             for cell in row:
-                cell_numbers = [n.strip() for n in cell.split(',') if n.strip()]
+                cell_numbers = [normalize_phone_number(n.strip()) for n in cell.split(',') if n.strip()]
                 numbers.extend(cell_numbers)
         
         # Remove duplicates while preserving order
         seen = set()
         unique_numbers = []
         for num in numbers:
-            if num not in seen:
+            if num and num not in seen:
                 seen.add(num)
                 unique_numbers.append(num)
         
@@ -83,7 +87,7 @@ async def fetch_call_data(
         return [], []
     
     # Build WHERE clause
-    where_clauses = ["c.number = ANY($1)"]
+    where_clauses = ["regexp_replace(c.number, '[^0-9]', '', 'g') = ANY($1)"]
     params = [numbers]
     param_count = 1
     
@@ -172,7 +176,7 @@ async def fetch_call_data(
         # All calls in this group have the same number and campaign info
         first_call = call_list[0]
         number = first_call['number']
-        found_numbers.add(number)
+        found_numbers.add(normalize_phone_number(number))
         
         # Build stage data for all stages in this call session
         stages = []
@@ -205,7 +209,7 @@ async def fetch_call_data(
     # Process calls without call_id (each is treated as separate session)
     for call in calls_without_id:
         number = call['number']
-        found_numbers.add(number)
+        found_numbers.add(normalize_phone_number(number))
         
         stage_data = CallStageData(
             stage=call['stage'],
