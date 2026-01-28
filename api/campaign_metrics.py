@@ -334,6 +334,9 @@ async def get_client_campaign(
         if categories:
             reverse_mapping = {}
             for orig, combined in CLIENT_CATEGORY_MAPPING.items():
+                # Skip empty string mappings
+                if combined == "":
+                    continue
                 if combined not in reverse_mapping:
                     reverse_mapping[combined] = []
                 reverse_mapping[combined].append(orig)
@@ -421,12 +424,16 @@ async def get_client_campaign(
                 original_name=combined_name
             ))
         
-        # Format paginated calls
+        # Format paginated calls - filter out empty string categories
         calls_data = []
         for call in paginated_calls:
             original_category = call['category_name'] or 'Unknown'
             # Use the resolver function with full call data
             combined_category = resolve_client_category(original_category, call)
+            
+            # Skip calls with empty string category mapping
+            if combined_category == "":
+                continue
             
             calls_data.append(CallRecord(
                 id=call['id'],
@@ -471,9 +478,9 @@ async def get_client_campaign(
                 has_next=page < total_pages,
                 has_prev=page > 1
             )
-        )    
-# ============== ADMIN ENDPOINT ==============
+        )
 
+# ============== ADMIN ENDPOINT ==============
 
 @router.get("/admin/{campaign_id}/dashboard", response_model=AdminCampaignDashboardResponse)
 async def get_admin_campaign_dashboard(

@@ -23,6 +23,9 @@ CLIENT_CATEGORY_MAPPING = {
     "notresponding" : "DAIR",
     "usersilent": "User Silent",
     "userhangup": "User Hangup",
+
+    # ignored
+    "repeatpitch": "",
 }
 
 
