@@ -78,7 +78,7 @@ def parse_csv_numbers(content: bytes) -> List[str]:
 async def fetch_call_data(
     numbers: List[str],
     conn,
-    client_id: Optional[int] = None,
+    client_campaign_model_id: Optional[int] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None
 ) -> tuple[List[CallLookupResult], List[str]]:
@@ -91,11 +91,11 @@ async def fetch_call_data(
     params = [numbers]
     param_count = 1
     
-    # Add client filter
-    if client_id:
+    # Add client_campaign_model filter
+    if client_campaign_model_id:
         param_count += 1
-        where_clauses.append(f"ccm.client_id = ${param_count}")
-        params.append(client_id)
+        where_clauses.append(f"ccm.id = ${param_count}")
+        params.append(client_campaign_model_id)
     
     # Add date filters
     if start_date:
@@ -249,7 +249,7 @@ def generate_csv_output(
     
     # Write filter information
     writer.writerow(['Applied Filters:'])
-    writer.writerow(['Client ID', filters.get('client_id', 'All')])
+    writer.writerow(['Client Campaign Model ID', filters.get('client_campaign_model_id', 'All')])
     writer.writerow(['Start Date', filters.get('start_date', 'All')])
     writer.writerow(['End Date', filters.get('end_date', 'All')])
     writer.writerow([])  # Empty row
@@ -306,7 +306,7 @@ def generate_csv_output(
 @router.post("/json", response_model=CallLookupResponse)
 async def lookup_calls_json(
     file: UploadFile = File(..., description="CSV file containing phone numbers"),
-    client_id: Optional[int] = Query(None, description="Filter by specific client"),
+    client_campaign_model_id: Optional[int] = Query(None, description="Filter by specific client campaign model"),
     start_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="End date YYYY-MM-DD"),
     user_info: Dict = Depends(require_roles(["admin", "onboarding"]))
@@ -327,7 +327,7 @@ async def lookup_calls_json(
     Each call_id represents a separate call session to that number.
     
     Optional Filters:
-    - client_id: Filter calls by specific client
+    - client_campaign_model_id: Filter calls by specific client campaign model
     - start_date: Filter calls from this date onwards (YYYY-MM-DD)
     - end_date: Filter calls up to this date (YYYY-MM-DD)
     
@@ -356,13 +356,13 @@ async def lookup_calls_json(
         results, not_found = await fetch_call_data(
             numbers,
             conn,
-            client_id=client_id,
+            client_campaign_model_id=client_campaign_model_id,
             start_date=start_date,
             end_date=end_date
         )
     
     filters_applied = {
-        "client_id": str(client_id) if client_id else None,
+        "client_campaign_model_id": str(client_campaign_model_id) if client_campaign_model_id else None,
         "start_date": start_date,
         "end_date": end_date
     }
@@ -379,7 +379,7 @@ async def lookup_calls_json(
 @router.post("/csv")
 async def lookup_calls_csv(
     file: UploadFile = File(..., description="CSV file containing phone numbers"),
-    client_id: Optional[int] = Query(None, description="Filter by specific client"),
+    client_campaign_model_id: Optional[int] = Query(None, description="Filter by specific client campaign model"),
     start_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="End date YYYY-MM-DD"),
     user_info: Dict = Depends(require_roles(["admin", "onboarding"]))
@@ -400,7 +400,7 @@ async def lookup_calls_csv(
     Each call_id represents a separate call session to that number.
     
     Optional Filters:
-    - client_id: Filter calls by specific client
+    - client_campaign_model_id: Filter calls by specific client campaign model
     - start_date: Filter calls from this date onwards (YYYY-MM-DD)
     - end_date: Filter calls up to this date (YYYY-MM-DD)
 
@@ -429,14 +429,14 @@ async def lookup_calls_csv(
         results, not_found = await fetch_call_data(
             numbers,
             conn,
-            client_id=client_id,
+            client_campaign_model_id=client_campaign_model_id,
             start_date=start_date,
             end_date=end_date
         )
 
     # Generate CSV output with filter information
     filters = {
-        "client_id": str(client_id) if client_id else None,
+        "client_campaign_model_id": str(client_campaign_model_id) if client_campaign_model_id else None,
         "start_date": start_date or None,
         "end_date": end_date or None
     }
@@ -447,8 +447,8 @@ async def lookup_calls_csv(
 
     # Build filename with filter information
     filename_parts = ['call_lookup_results']
-    if client_id:
-        filename_parts.append(f'client_{client_id}')
+    if client_campaign_model_id:
+        filename_parts.append(f'campaign_{client_campaign_model_id}')
     if start_date:
         filename_parts.append(f'from_{start_date}')
     if end_date:
