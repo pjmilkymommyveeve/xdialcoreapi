@@ -6,7 +6,7 @@ from database.db import init_db_pool, close_db_pool
 
 # import routers
 from api.stats import campaign_stats, server_stats, voice_stats
-from api import auth, campaign_metrics, export, integration, recordings, client, client_employees, call_lookup, response_categories
+from api import auth, campaign_metrics, export, integration, recordings, client, client_employees, call_lookup, response_categories, voices, campaign_models, campaign_model_voices, voice_categories, voice_recordings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -44,6 +44,11 @@ app.include_router(recordings.router, prefix=settings.app.api_prefix)
 app.include_router(export.router, prefix=settings.app.api_prefix)
 app.include_router(integration.router, prefix=settings.app.api_prefix)
 app.include_router(response_categories.router, prefix=settings.app.api_prefix)
+app.include_router(voices.router, prefix=settings.app.api_prefix)
+app.include_router(campaign_models.router, prefix=settings.app.api_prefix)
+app.include_router(campaign_model_voices.router, prefix=settings.app.api_prefix)
+app.include_router(voice_categories.router, prefix=settings.app.api_prefix)
+app.include_router(voice_recordings.router, prefix=settings.app.api_prefix)
 app.include_router(call_lookup.router, prefix=settings.app.api_prefix)
 app.include_router(voice_stats.router, prefix=settings.app.api_prefix)
 app.include_router(server_stats.router, prefix=settings.app.api_prefix)

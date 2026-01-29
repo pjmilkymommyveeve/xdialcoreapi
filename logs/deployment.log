@@ -1,0 +1,27 @@
+=== Deployment Log (delete) ===
+Timestamp: 2026-01-29 19:05:31
+Action: delete
+Files: 2.0_pitch_medicare_oep_chalsea.wav
+Servers: 1 server(s)
+
+=== STDOUT ===
+[0;32m[INFO][0m 2026-01-29 19:05:31 - === Voice Recordings Deployment Script ===
+[0;32m[INFO][0m 2026-01-29 19:05:31 - Action: delete
+[0;32m[INFO][0m 2026-01-29 19:05:31 - Files: 2.0_pitch_medicare_oep_chalsea.wav
+[0;32m[INFO][0m 2026-01-29 19:05:31 - Servers received: 5.78.143.148
+[0;32m[INFO][0m 2026-01-29 19:05:31 - ==========================================
+[0;32m[INFO][0m 2026-01-29 19:05:31 - Deploying to 1 server(s)
+[0;32m[INFO][0m 2026-01-29 19:05:31 - Server IP: '5.78.143.148'
+
+[0;32m[INFO][0m 2026-01-29 19:05:31 - Processing 5.78.143.148...
+[0;32m[INFO][0m 2026-01-29 19:05:38 - Deleting 2.0_pitch_medicare_oep_chalsea.wav from 5.78.143.148...
+[0;32m[SUCCESS][0m 2026-01-29 19:05:47 - ✓ Deleted 2.0_pitch_medicare_oep_chalsea.wav from 5.78.143.148
+
+
+=== STDERR ===
+
+
+=== Return Code: 1 ===
+
+================================================================================
+
