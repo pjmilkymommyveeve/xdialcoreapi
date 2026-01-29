@@ -25,3 +25,204 @@ Servers: 1 server(s)
 
 ================================================================================
 
+=== Deployment Log (upload) ===
+Timestamp: 2026-01-29 23:10:13
+Action: upload
+Files: 2.0_pitch_medicare_oep_chalsea.wav
+Servers: 1 server(s)
+
+=== STDOUT ===
+[0;32m[INFO][0m 2026-01-29 23:10:13 - === Voice Recordings Deployment Script ===
+[0;32m[INFO][0m 2026-01-29 23:10:13 - Action: upload
+[0;32m[INFO][0m 2026-01-29 23:10:13 - Files: 2.0_pitch_medicare_oep_chalsea.wav
+[0;32m[INFO][0m 2026-01-29 23:10:13 - Servers received: 5.78.143.148
+[0;32m[INFO][0m 2026-01-29 23:10:13 - ==========================================
+[0;32m[INFO][0m 2026-01-29 23:10:13 - Deploying to 1 server(s)
+[0;32m[INFO][0m 2026-01-29 23:10:13 - Server IP: '5.78.143.148'
+
+[0;32m[INFO][0m 2026-01-29 23:10:13 - Processing 5.78.143.148...
+
+
+=== STDERR ===
+[0;31m[ERROR][0m 2026-01-29 23:10:23 - 2.0_pitch_medicare_oep_chalsea.wav not found locally
+
+
+=== Return Code: 1 ===
+
+================================================================================
+
+=== Deployment Log (delete) ===
+Timestamp: 2026-01-29 23:11:32
+Action: delete
+Files: 2.0_pitch_medicare_oep_chalsea.wav
+Servers: 1 server(s)
+
+=== STDOUT ===
+[0;32m[INFO][0m 2026-01-29 23:11:32 - === Voice Recordings Deployment Script ===
+[0;32m[INFO][0m 2026-01-29 23:11:32 - Action: delete
+[0;32m[INFO][0m 2026-01-29 23:11:32 - Files: 2.0_pitch_medicare_oep_chalsea.wav
+[0;32m[INFO][0m 2026-01-29 23:11:32 - Servers received: 5.78.143.148
+[0;32m[INFO][0m 2026-01-29 23:11:32 - ==========================================
+[0;32m[INFO][0m 2026-01-29 23:11:32 - Deploying to 1 server(s)
+[0;32m[INFO][0m 2026-01-29 23:11:32 - Server IP: '5.78.143.148'
+
+[0;32m[INFO][0m 2026-01-29 23:11:32 - Processing 5.78.143.148...
+[0;32m[INFO][0m 2026-01-29 23:11:41 - Deleting 2.0_pitch_medicare_oep_chalsea.wav from 5.78.143.148...
+[0;32m[SUCCESS][0m 2026-01-29 23:11:49 - ✓ Deleted 2.0_pitch_medicare_oep_chalsea.wav from 5.78.143.148
+
+
+=== STDERR ===
+
+
+=== Return Code: 1 ===
+
+================================================================================
+
+=== Deployment Log (upload) ===
+Timestamp: 2026-01-29 23:11:57
+Action: upload
+Files: 2.0_pitch_medicare_oep_chalsea.wav
+Servers: 1 server(s)
+
+=== STDOUT ===
+[0;32m[INFO][0m 2026-01-29 23:11:57 - === Voice Recordings Deployment Script ===
+[0;32m[INFO][0m 2026-01-29 23:11:57 - Action: upload
+[0;32m[INFO][0m 2026-01-29 23:11:57 - Files: 2.0_pitch_medicare_oep_chalsea.wav
+[0;32m[INFO][0m 2026-01-29 23:11:57 - Servers received: 5.78.143.148
+[0;32m[INFO][0m 2026-01-29 23:11:57 - ==========================================
+[0;32m[INFO][0m 2026-01-29 23:11:57 - Deploying to 1 server(s)
+[0;32m[INFO][0m 2026-01-29 23:11:57 - Server IP: '5.78.143.148'
+
+[0;32m[INFO][0m 2026-01-29 23:11:57 - Processing 5.78.143.148...
+
+
+=== STDERR ===
+[0;31m[ERROR][0m 2026-01-29 23:12:03 - 2.0_pitch_medicare_oep_chalsea.wav not found locally
+
+
+=== Return Code: 1 ===
+
+================================================================================
+
+=== Deployment Log (delete) ===
+Timestamp: 2026-01-29 23:22:25
+Action: delete
+Files: 2.0_pitch_medicare_oep_chalsea.wav
+Servers: 1 server(s)
+
+=== STDOUT ===
+[0;32m[INFO][0m 2026-01-29 23:22:25 - === Voice Recordings Deployment Script ===
+[0;32m[INFO][0m 2026-01-29 23:22:25 - Action: delete
+[0;32m[INFO][0m 2026-01-29 23:22:25 - Files: 2.0_pitch_medicare_oep_chalsea.wav
+[0;32m[INFO][0m 2026-01-29 23:22:25 - Servers received: 5.78.143.148
+[0;32m[INFO][0m 2026-01-29 23:22:25 - Source directory: /home/doc/work/xdialcoreapi/sounds
+[0;32m[INFO][0m 2026-01-29 23:22:25 - ==========================================
+[0;32m[INFO][0m 2026-01-29 23:22:25 - Deploying to 1 server(s)
+[0;32m[INFO][0m 2026-01-29 23:22:25 - Server IP: '5.78.143.148'
+
+[0;32m[INFO][0m 2026-01-29 23:22:25 - Processing 5.78.143.148...
+[0;32m[INFO][0m 2026-01-29 23:22:35 - Deleting 2.0_pitch_medicare_oep_chalsea.wav from 5.78.143.148...
+[0;32m[SUCCESS][0m 2026-01-29 23:22:41 - ✓ Deleted 2.0_pitch_medicare_oep_chalsea.wav from 5.78.143.148
+
+
+=== STDERR ===
+
+
+=== Return Code: 1 ===
+
+================================================================================
+
+=== Deployment Log (upload) ===
+Timestamp: 2026-01-29 23:23:01
+Action: upload
+Files: 2.0_pitch_medicare_oep_chalsea.wav
+Servers: 1 server(s)
+
+=== STDOUT ===
+[0;32m[INFO][0m 2026-01-29 23:23:01 - === Voice Recordings Deployment Script ===
+[0;32m[INFO][0m 2026-01-29 23:23:01 - Action: upload
+[0;32m[INFO][0m 2026-01-29 23:23:01 - Files: 2.0_pitch_medicare_oep_chalsea.wav
+[0;32m[INFO][0m 2026-01-29 23:23:01 - Servers received: 5.78.143.148
+[0;32m[INFO][0m 2026-01-29 23:23:01 - Source directory: /home/doc/work/xdialcoreapi/sounds
+[0;32m[INFO][0m 2026-01-29 23:23:01 - ==========================================
+[0;32m[INFO][0m 2026-01-29 23:23:01 - Deploying to 1 server(s)
+[0;32m[INFO][0m 2026-01-29 23:23:01 - Server IP: '5.78.143.148'
+
+[0;32m[INFO][0m 2026-01-29 23:23:01 - Processing 5.78.143.148...
+[0;32m[INFO][0m 2026-01-29 23:23:11 - Uploading 2.0_pitch_medicare_oep_chalsea.wav to 5.78.143.148...
+sending incremental file list
+2.0_pitch_medicare_oep_chalsea.wav
+
+sent 168,552 bytes  received 35 bytes  11,626.69 bytes/sec
+total size is 216,582  speedup is 1.28
+[0;32m[SUCCESS][0m 2026-01-29 23:23:25 - ✓ Uploaded 2.0_pitch_medicare_oep_chalsea.wav to 5.78.143.148
+
+
+=== STDERR ===
+
+
+=== Return Code: 1 ===
+
+================================================================================
+
+=== Deployment Log (delete) ===
+Timestamp: 2026-01-29 23:23:52
+Action: delete
+Files: 2.0_pitch_medicare_oep_chalsea.wav
+Servers: 1 server(s)
+
+=== STDOUT ===
+[0;32m[INFO][0m 2026-01-29 23:23:52 - === Voice Recordings Deployment Script ===
+[0;32m[INFO][0m 2026-01-29 23:23:52 - Action: delete
+[0;32m[INFO][0m 2026-01-29 23:23:52 - Files: 2.0_pitch_medicare_oep_chalsea.wav
+[0;32m[INFO][0m 2026-01-29 23:23:52 - Servers received: 5.78.143.148
+[0;32m[INFO][0m 2026-01-29 23:23:52 - Source directory: /home/doc/work/xdialcoreapi/sounds
+[0;32m[INFO][0m 2026-01-29 23:23:52 - ==========================================
+[0;32m[INFO][0m 2026-01-29 23:23:52 - Deploying to 1 server(s)
+[0;32m[INFO][0m 2026-01-29 23:23:52 - Server IP: '5.78.143.148'
+
+[0;32m[INFO][0m 2026-01-29 23:23:52 - Processing 5.78.143.148...
+[0;32m[INFO][0m 2026-01-29 23:23:58 - Deleting 2.0_pitch_medicare_oep_chalsea.wav from 5.78.143.148...
+[0;32m[SUCCESS][0m 2026-01-29 23:24:09 - ✓ Deleted 2.0_pitch_medicare_oep_chalsea.wav from 5.78.143.148
+
+
+=== STDERR ===
+
+
+=== Return Code: 1 ===
+
+================================================================================
+
+=== Deployment Log (upload) ===
+Timestamp: 2026-01-29 23:24:26
+Action: upload
+Files: 2.0_pitch_medicare_oep_chalsea.wav
+Servers: 1 server(s)
+
+=== STDOUT ===
+[0;32m[INFO][0m 2026-01-29 23:24:26 - === Voice Recordings Deployment Script ===
+[0;32m[INFO][0m 2026-01-29 23:24:26 - Action: upload
+[0;32m[INFO][0m 2026-01-29 23:24:26 - Files: 2.0_pitch_medicare_oep_chalsea.wav
+[0;32m[INFO][0m 2026-01-29 23:24:26 - Servers received: 5.78.143.148
+[0;32m[INFO][0m 2026-01-29 23:24:26 - Source directory: /home/doc/work/xdialcoreapi/sounds
+[0;32m[INFO][0m 2026-01-29 23:24:26 - ==========================================
+[0;32m[INFO][0m 2026-01-29 23:24:26 - Deploying to 1 server(s)
+[0;32m[INFO][0m 2026-01-29 23:24:26 - Server IP: '5.78.143.148'
+
+[0;32m[INFO][0m 2026-01-29 23:24:26 - Processing 5.78.143.148...
+[0;32m[INFO][0m 2026-01-29 23:24:34 - Uploading 2.0_pitch_medicare_oep_chalsea.wav to 5.78.143.148...
+sending incremental file list
+2.0_pitch_medicare_oep_chalsea.wav
+
+sent 168,552 bytes  received 35 bytes  14,659.74 bytes/sec
+total size is 216,582  speedup is 1.28
+[0;32m[SUCCESS][0m 2026-01-29 23:24:45 - ✓ Uploaded 2.0_pitch_medicare_oep_chalsea.wav to 5.78.143.148
+
+
+=== STDERR ===
+
+
+=== Return Code: 1 ===
+
+================================================================================
+

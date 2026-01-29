@@ -108,7 +108,8 @@ def run_deployment_script(action: str, files: List[str], server_ips: List[str]) 
             DEPLOY_SCRIPT_PATH,
             action,
             ",".join(files),
-            ",".join(server_ips)
+            ",".join(server_ips),
+            RECORDINGS_DIR  # Add source directory
         ]
         
         # Run deployment script
