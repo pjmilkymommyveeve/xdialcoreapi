@@ -819,7 +819,8 @@ async def get_admin_campaign_dashboard(
             combined_category = ADMIN_CATEGORY_MAPPING.get(original_category, original_category)
             
             stage_details = []
-            for stage_call in stages_sorted:
+            # Exclude the last stage from stage_details
+            for stage_call in stages_sorted[:-1]:
                 stage_category = stage_call['category_name'] or 'Unknown'
                 stage_combined = ADMIN_CATEGORY_MAPPING.get(stage_category, stage_category)
                 
@@ -878,7 +879,6 @@ async def get_admin_campaign_dashboard(
                 has_prev=page > 1
             )
         )
-
 # ============== TRANSFER METRICS ENDPOINT ==============
 
 @router.get("/{campaign_id}/transfer-metrics", response_model=TransferMetrics)
