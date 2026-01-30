@@ -7,7 +7,8 @@ from database.db import init_db_pool, close_db_pool
 
 # import routers
 from api.stats import campaign_stats, server_stats, voice_stats
-from api import auth, campaign_metrics, export, integration, recordings, client, client_employees, call_lookup, response_categories, voices, campaign_models, voice_categories, voice_recordings
+from api import auth, campaign_metrics, export, integration, recordings, client, client_employees, call_lookup, response_categories, campaign_models
+from api.voice import voices, voice_categories, voice_recordings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
