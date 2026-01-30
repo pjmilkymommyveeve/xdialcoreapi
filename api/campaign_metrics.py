@@ -245,7 +245,7 @@ async def get_client_campaign(
     sort_order: str = Query("desc", regex="^(asc|desc)$", description="Sort order for timestamp: asc or desc")
 ):
     """Get client campaign dashboard with call records (latest stage of each call session)."""
-    PRIVILEGED_ROLES = ['admin']
+    PRIVILEGED_ROLES = ['admin', 'onboarding', 'qa']
     
     user_id = user_info['user_id']
     roles = user_info['roles']
