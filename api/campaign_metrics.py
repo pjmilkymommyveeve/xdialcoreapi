@@ -232,7 +232,7 @@ async def verify_campaign_access(conn, campaign_id: int, user_id: int, roles: Li
 @router.get("/{campaign_id}/dashboard", response_model=CampaignDashboardResponse)
 async def get_client_campaign(
     campaign_id: int,
-    user_info: Dict = Depends(require_roles(['admin', 'onboarding', 'client', 'client_member'])),
+    user_info: Dict = Depends(require_roles(['admin', 'onboarding', 'client', 'client_member', 'qa', 'onboarding'])),
     search: str = Query("", description="Search by number or category"),
     list_id: str = Query("", description="Filter by list ID"),
     start_date: str = Query("", description="Start date YYYY-MM-DD"),
@@ -251,7 +251,7 @@ async def get_client_campaign(
     roles = user_info['roles']
     
     is_privileged = any(role in PRIVILEGED_ROLES for role in roles)
-    allowed_statuses = ['Enabled', 'Testing']
+    allowed_statuses = ['Enabled', 'Testing', 'Disabled'] if PRIVILEGED_ROLES else ['Enabled', 'Testing']
     
     pool = await get_db()
     
@@ -884,7 +884,7 @@ async def get_admin_campaign_dashboard(
 @router.get("/{campaign_id}/transfer-metrics", response_model=TransferMetrics)
 async def get_transfer_metrics(
     campaign_id: int,
-    user_info: Dict = Depends(require_roles(['admin', 'onboarding', 'client', 'client_member'])),
+    user_info: Dict = Depends(require_roles(['admin', 'onboarding', 'client', 'client_member', 'qa', 'onboarding'])),
     start_date: str = Query("", description="Start date YYYY-MM-DD"),
     start_time: str = Query("", description="Start time HH:MM"),
     end_date: str = Query("", description="End date YYYY-MM-DD"),
@@ -991,7 +991,7 @@ async def get_transfer_metrics(
 @router.get("/{campaign_id}/category-timeseries", response_model=CategoryTimeSeriesResponse)
 async def get_category_timeseries(
     campaign_id: int,
-    user_info: Dict = Depends(require_roles(['admin', 'onboarding', 'client', 'client_member'])),
+    user_info: Dict = Depends(require_roles(['admin', 'onboarding', 'client', 'client_member', 'qa', 'onboarding'])),
     start_date: str = Query("", description="Start date YYYY-MM-DD"),
     start_time: str = Query("", description="Start time HH:MM"),
     end_date: str = Query("", description="End date YYYY-MM-DD"),
