@@ -72,29 +72,6 @@ async def get_voice(voice_id: int):
         return {'id': voice['id'], 'name': voice['name']}
 
 
-@router.post("/", response_model=VoiceResponse, status_code=status.HTTP_201_CREATED)
-async def create_voice(voice_data: VoiceCreate):
-    """Create a new voice."""
-    pool = await get_db()
-    
-    async with pool.acquire() as conn:
-        # Check if voice name already exists
-        check_query = "SELECT id FROM voices WHERE name = $1"
-        existing = await conn.fetchrow(check_query, voice_data.name)
-        
-        if existing:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Voice with name '{voice_data.name}' already exists"
-            )
-        
-        # Insert new voice
-        insert_query = "INSERT INTO voices (name) VALUES ($1) RETURNING id, name"
-        voice = await conn.fetchrow(insert_query, voice_data.name)
-        
-        return {'id': voice['id'], 'name': voice['name']}
-
-
 @router.post("/bulk", response_model=BulkVoiceCreateResponse, status_code=status.HTTP_201_CREATED)
 async def create_voices_bulk(bulk_data: BulkVoiceCreate):
     """Create multiple voices at once."""
@@ -130,70 +107,6 @@ async def create_voices_bulk(bulk_data: BulkVoiceCreate):
         voices=created_voices,
         errors=errors
     )
-
-
-@router.put("/{voice_id}", response_model=VoiceResponse)
-async def update_voice(voice_id: int, voice_data: VoiceUpdate):
-    """Update a voice's name."""
-    pool = await get_db()
-    
-    async with pool.acquire() as conn:
-        # Check if voice exists
-        check_query = "SELECT id FROM voices WHERE id = $1"
-        existing = await conn.fetchrow(check_query, voice_id)
-        
-        if not existing:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Voice with ID {voice_id} not found"
-            )
-        
-        # Check if new name conflicts
-        conflict_query = "SELECT id FROM voices WHERE name = $1 AND id != $2"
-        conflict = await conn.fetchrow(conflict_query, voice_data.name, voice_id)
-        
-        if conflict:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Voice with name '{voice_data.name}' already exists"
-            )
-        
-        # Update voice
-        update_query = "UPDATE voices SET name = $1 WHERE id = $2 RETURNING id, name"
-        voice = await conn.fetchrow(update_query, voice_data.name, voice_id)
-        
-        return {'id': voice['id'], 'name': voice['name']}
-
-
-@router.delete("/{voice_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_voice(voice_id: int):
-    """Delete a voice. Fails if assigned to any campaign models."""
-    pool = await get_db()
-    
-    async with pool.acquire() as conn:
-        # Check if voice exists
-        check_query = "SELECT id FROM voices WHERE id = $1"
-        existing = await conn.fetchrow(check_query, voice_id)
-        
-        if not existing:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Voice with ID {voice_id} not found"
-            )
-        
-        # Check if voice is assigned
-        usage_query = "SELECT COUNT(*) as count FROM campaign_model_voice WHERE voice_id = $1"
-        usage = await conn.fetchrow(usage_query, voice_id)
-        
-        if usage['count'] > 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Cannot delete voice: assigned to {usage['count']} campaign model(s)"
-            )
-        
-        # Delete voice
-        delete_query = "DELETE FROM voices WHERE id = $1"
-        await conn.execute(delete_query, voice_id)
 
 
 @router.post("/bulk-delete", response_model=BulkVoiceDeleteResponse)

@@ -41,7 +41,6 @@ class DeleteRecordingsResponse(BaseModel):
 RECORDINGS_DIR = "/home/doc/work/xdialcoreapi/sounds"
 DEPLOY_SCRIPT_PATH = "/home/doc/work/xdialcoreapi/scripts/deploy_recordings.sh"
 DEPLOY_LOG_FILE = "/home/doc/work/xdialcoreapi/logs/deployment.log"
-REMOTE_PATH = "/usr/share/asterisk/sounds"
 
 # Ensure directories exist
 os.makedirs(RECORDINGS_DIR, exist_ok=True)

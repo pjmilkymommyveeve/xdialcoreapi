@@ -1,12 +1,13 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from api.voice import campaign_model_voices
 from core.settings import settings
 from database.db import init_db_pool, close_db_pool
 
 # import routers
 from api.stats import campaign_stats, server_stats, voice_stats
-from api import auth, campaign_metrics, export, integration, recordings, client, client_employees, call_lookup, response_categories, voices, campaign_models, campaign_model_voices, voice_categories, voice_recordings
+from api import auth, campaign_metrics, export, integration, recordings, client, client_employees, call_lookup, response_categories, voices, campaign_models, voice_categories, voice_recordings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

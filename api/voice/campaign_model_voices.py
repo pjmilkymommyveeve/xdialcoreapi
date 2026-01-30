@@ -166,62 +166,6 @@ async def get_campaign_model_voices_with_recordings(campaign_model_id: int):
         return result
 
 
-@router.post("/", response_model=CampaignModelVoiceResponse, status_code=status.HTTP_201_CREATED)
-async def assign_voice_to_campaign_model(assignment: CampaignModelVoiceCreate):
-    """Assign a voice to a campaign model."""
-    pool = await get_db()
-    
-    async with pool.acquire() as conn:
-        # Check if campaign model exists
-        cm_check = "SELECT id FROM campaign_model WHERE id = $1"
-        cm_exists = await conn.fetchrow(cm_check, assignment.campaign_model_id)
-        
-        if not cm_exists:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Campaign model with ID {assignment.campaign_model_id} not found"
-            )
-        
-        # Check if voice exists
-        voice_check = "SELECT id, name FROM voices WHERE id = $1"
-        voice = await conn.fetchrow(voice_check, assignment.voice_id)
-        
-        if not voice:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Voice with ID {assignment.voice_id} not found"
-            )
-        
-        # Check if assignment already exists
-        existing_query = """
-            SELECT id FROM campaign_model_voice 
-            WHERE campaign_model_id = $1 AND voice_id = $2
-        """
-        existing = await conn.fetchrow(existing_query, assignment.campaign_model_id, assignment.voice_id)
-        
-        if existing:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Voice '{voice['name']}' already assigned to this campaign model"
-            )
-        
-        # Create assignment
-        insert_query = """
-            INSERT INTO campaign_model_voice (campaign_model_id, voice_id, active)
-            VALUES ($1, $2, $3)
-            RETURNING id, campaign_model_id, voice_id, active
-        """
-        result = await conn.fetchrow(insert_query, assignment.campaign_model_id, assignment.voice_id, assignment.active)
-        
-        return {
-            'id': result['id'],
-            'campaign_model_id': result['campaign_model_id'],
-            'voice_id': result['voice_id'],
-            'voice_name': voice['name'],
-            'active': result['active']
-        }
-
-
 @router.post("/bulk", response_model=BulkCampaignModelVoiceCreateResponse, status_code=status.HTTP_201_CREATED)
 async def assign_voices_to_campaign_models_bulk(bulk_data: BulkCampaignModelVoiceCreate):
     """Assign multiple voices to campaign models at once."""
@@ -288,43 +232,6 @@ async def assign_voices_to_campaign_models_bulk(bulk_data: BulkCampaignModelVoic
     )
 
 
-@router.put("/{cmv_id}", response_model=CampaignModelVoiceResponse)
-async def update_campaign_model_voice(cmv_id: int, update_data: CampaignModelVoiceUpdate):
-    """Toggle voice active status for a campaign model."""
-    pool = await get_db()
-    
-    async with pool.acquire() as conn:
-        # Check if assignment exists
-        check_query = """
-            SELECT cmv.id, cmv.campaign_model_id, cmv.voice_id, v.name as voice_name
-            FROM campaign_model_voice cmv
-            JOIN voices v ON cmv.voice_id = v.id
-            WHERE cmv.id = $1
-        """
-        existing = await conn.fetchrow(check_query, cmv_id)
-        
-        if not existing:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Campaign model voice assignment with ID {cmv_id} not found"
-            )
-        
-        # Update assignment
-        update_query = """
-            UPDATE campaign_model_voice SET active = $1 WHERE id = $2
-            RETURNING id, campaign_model_id, voice_id, active
-        """
-        result = await conn.fetchrow(update_query, update_data.active, cmv_id)
-        
-        return {
-            'id': result['id'],
-            'campaign_model_id': result['campaign_model_id'],
-            'voice_id': result['voice_id'],
-            'voice_name': existing['voice_name'],
-            'active': result['active']
-        }
-
-
 @router.put("/bulk", response_model=BulkCampaignModelVoiceUpdateResponse)
 async def update_campaign_model_voices_bulk(bulk_data: BulkCampaignModelVoiceUpdate):
     """Update multiple campaign model voice assignments at once."""
@@ -374,27 +281,6 @@ async def update_campaign_model_voices_bulk(bulk_data: BulkCampaignModelVoiceUpd
         assignments=updated_assignments,
         errors=errors
     )
-
-
-@router.delete("/{cmv_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def remove_voice_from_campaign_model(cmv_id: int):
-    """Remove a voice from a campaign model. Deletes all associated recordings."""
-    pool = await get_db()
-    
-    async with pool.acquire() as conn:
-        # Check if assignment exists
-        check_query = "SELECT id FROM campaign_model_voice WHERE id = $1"
-        existing = await conn.fetchrow(check_query, cmv_id)
-        
-        if not existing:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Campaign model voice assignment with ID {cmv_id} not found"
-            )
-        
-        # Delete assignment (cascade deletes recordings)
-        delete_query = "DELETE FROM campaign_model_voice WHERE id = $1"
-        await conn.execute(delete_query, cmv_id)
 
 
 @router.post("/bulk-delete", response_model=BulkCampaignModelVoiceDeleteResponse)
