@@ -26,6 +26,8 @@ CLIENT_CATEGORY_MAPPING = {
 
     # ignored
     "repeatpitch": "",
+    "greetingresponse": "",
+    "notfeelinggood": "",
 }
 
 
@@ -47,4 +49,7 @@ ADMIN_CATEGORY_MAPPING = {
     "repeatpitch": "Repeat Pitch",
     "interested": "Interested",
     "unkown": "Unclear Response",
+    "inaudible": "Inaudible",
+    "greetingresponse": "Greeting Response",
+    "notfeelinggood" : "Not Feeling Good",
 }
