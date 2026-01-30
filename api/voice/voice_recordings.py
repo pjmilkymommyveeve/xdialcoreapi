@@ -205,9 +205,9 @@ async def upload_voice_recordings(
     This endpoint:
     1. Validates the campaign_model_voice_id
     2. Saves files to /home/doc/work/xdialcoreapi/sounds
-    3. Creates database records
-    4. Fetches server IPs from database
-    5. Runs bash script to deploy to all servers
+    3. Fetches server IPs from database
+    4. Runs bash script to deploy to all servers
+    5. Creates database records ONLY AFTER successful deployment
     6. Appends deployment logs to /home/doc/work/xdialcoreapi/logs/deployment.log
     """
     pool = await get_db()
@@ -233,10 +233,10 @@ async def upload_voice_recordings(
         
         uploaded_recordings = []
         failed_files = []
-        saved_files = []
         errors = []
+        files_to_deploy = []
         
-        # Process each file
+        # Process each file - save locally first, deploy later
         for file in files:
             try:
                 # Validate file extension (audio files only)
@@ -270,24 +270,8 @@ async def upload_voice_recordings(
                 # Set file permissions (readable by all)
                 os.chmod(file_path, 0o644)
                 
-                saved_files.append(file.filename)
-                
-                # Create database record
-                insert_query = """
-                    INSERT INTO voice_recordings (name, campaign_model_voice_id)
-                    VALUES ($1, $2)
-                    RETURNING id, name, campaign_model_voice_id
-                """
-                result = await conn.fetchrow(insert_query, file.filename, campaign_model_voice_id)
-                
-                uploaded_recordings.append({
-                    'id': result['id'],
-                    'name': result['name'],
-                    'campaign_model_voice_id': result['campaign_model_voice_id'],
-                    'campaign_name': cmv['campaign_name'],
-                    'model_name': cmv['model_name'],
-                    'voice_name': cmv['voice_name']
-                })
+                # Track for deployment (don't create DB record yet)
+                files_to_deploy.append(file.filename)
                 
             except Exception as e:
                 errors.append(f"{file.filename}: {str(e)}")
@@ -297,24 +281,59 @@ async def upload_voice_recordings(
                 if os.path.exists(file_path):
                     os.remove(file_path)
         
-        # Deploy to all servers if any files were uploaded successfully
+        # Deploy to all servers BEFORE creating database entries
         deployment_log = ""
         deployment_success = True
         
-        if saved_files:
+        if files_to_deploy:
             # Get server IPs from database
             server_ips = await get_server_ips()
             
             if not server_ips:
                 errors.append("No servers found in database")
                 deployment_success = False
+                # Clean up local files since deployment can't proceed
+                for filename in files_to_deploy:
+                    file_path = os.path.join(RECORDINGS_DIR, filename)
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                    failed_files.append(filename)
             else:
                 # Log server IPs for debugging
                 print(f"Deploying to {len(server_ips)} servers: {', '.join(server_ips)}")
-                deployment_success, deployment_log = run_deployment_script("upload", saved_files, server_ips)
+                deployment_success, deployment_log = run_deployment_script("upload", files_to_deploy, server_ips)
                 
                 if not deployment_success:
                     errors.append("Deployment to servers failed. Check logs for details.")
+                    # Clean up local files since deployment failed
+                    for filename in files_to_deploy:
+                        file_path = os.path.join(RECORDINGS_DIR, filename)
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                        failed_files.append(filename)
+                else:
+                    # Deployment succeeded - NOW create database entries
+                    for filename in files_to_deploy:
+                        try:
+                            insert_query = """
+                                INSERT INTO voice_recordings (name, campaign_model_voice_id)
+                                VALUES ($1, $2)
+                                RETURNING id, name, campaign_model_voice_id
+                            """
+                            result = await conn.fetchrow(insert_query, filename, campaign_model_voice_id)
+                            
+                            uploaded_recordings.append({
+                                'id': result['id'],
+                                'name': result['name'],
+                                'campaign_model_voice_id': result['campaign_model_voice_id'],
+                                'campaign_name': cmv['campaign_name'],
+                                'model_name': cmv['model_name'],
+                                'voice_name': cmv['voice_name']
+                            })
+                            
+                        except Exception as e:
+                            errors.append(f"{filename}: Failed to create database entry - {str(e)}")
+                            failed_files.append(filename)
         
         return UploadRecordingsResponse(
             success=deployment_success and len(failed_files) == 0,
@@ -332,20 +351,20 @@ async def delete_voice_recordings(recording_ids: List[int] = Form(...)):
     Delete multiple voice recordings and remove them from all servers.
     
     This endpoint:
-    1. Validates recording IDs
-    2. Deletes category assignments
-    3. Deletes database records
-    4. Fetches server IPs from database
-    5. Runs bash script to delete from all servers
-    6. Appends deployment logs to /home/doc/work/xdialcoreapi/logs/deployment.log
+    1. Validates recording IDs and fetches filenames
+    2. Fetches server IPs from database
+    3. Runs bash script to delete from all servers
+    4. ONLY AFTER successful deployment: deletes category assignments and database records
+    5. Appends deployment logs to /home/doc/work/xdialcoreapi/logs/deployment.log
     """
     pool = await get_db()
     
     async with pool.acquire() as conn:
-        deleted_files = []
+        files_to_delete = []
+        recording_map = {}
         errors = []
         
-        # Fetch and validate all recordings
+        # Fetch and validate all recordings (don't delete yet)
         for recording_id in recording_ids:
             check_query = """
                 SELECT id, name FROM voice_recordings WHERE id = $1
@@ -356,29 +375,15 @@ async def delete_voice_recordings(recording_ids: List[int] = Form(...)):
                 errors.append(f"Recording ID {recording_id}: Not found")
                 continue
             
-            deleted_files.append(recording['name'])
-            
-            # Delete category assignments first
-            delete_categories_query = "DELETE FROM voice_recording_categories WHERE voice_recording_id = $1"
-            await conn.execute(delete_categories_query, recording_id)
-            
-            # Delete from database
-            delete_query = "DELETE FROM voice_recordings WHERE id = $1"
-            await conn.execute(delete_query, recording_id)
-            
-            # Delete from local storage
-            file_path = os.path.join(RECORDINGS_DIR, recording['name'])
-            if os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                except Exception as e:
-                    errors.append(f"{recording['name']}: Failed to delete local file - {str(e)}")
+            files_to_delete.append(recording['name'])
+            recording_map[recording['name']] = recording_id
         
-        # Deploy deletions to all servers
+        # Deploy deletions to all servers BEFORE touching database
         deployment_log = ""
         deployment_success = True
+        deleted_count = 0
         
-        if deleted_files:
+        if files_to_delete:
             # Get server IPs from database
             server_ips = await get_server_ips()
             
@@ -387,14 +392,40 @@ async def delete_voice_recordings(recording_ids: List[int] = Form(...)):
                 deployment_success = False
             else:
                 print(f"Deploying to {len(server_ips)} servers: {', '.join(server_ips)}")
-                deployment_success, deployment_log = run_deployment_script("delete", deleted_files, server_ips)
+                deployment_success, deployment_log = run_deployment_script("delete", files_to_delete, server_ips)
                 
                 if not deployment_success:
                     errors.append("Deployment to servers failed. Check logs for details.")
+                else:
+                    # Deployment succeeded - NOW delete from database
+                    for filename in files_to_delete:
+                        recording_id = recording_map[filename]
+                        
+                        try:
+                            # Delete category assignments first
+                            delete_categories_query = "DELETE FROM voice_recording_categories WHERE voice_recording_id = $1"
+                            await conn.execute(delete_categories_query, recording_id)
+                            
+                            # Delete from database
+                            delete_query = "DELETE FROM voice_recordings WHERE id = $1"
+                            await conn.execute(delete_query, recording_id)
+                            
+                            # Delete from local storage
+                            file_path = os.path.join(RECORDINGS_DIR, filename)
+                            if os.path.exists(file_path):
+                                try:
+                                    os.remove(file_path)
+                                except Exception as e:
+                                    errors.append(f"{filename}: Failed to delete local file - {str(e)}")
+                            
+                            deleted_count += 1
+                            
+                        except Exception as e:
+                            errors.append(f"{filename}: Failed to delete from database - {str(e)}")
         
         return DeleteRecordingsResponse(
             success=deployment_success and len(errors) == 0,
-            deleted_count=len(deleted_files),
+            deleted_count=deleted_count,
             deployment_log=deployment_log,
             errors=errors
         )
