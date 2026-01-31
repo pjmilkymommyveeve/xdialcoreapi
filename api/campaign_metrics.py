@@ -244,7 +244,7 @@ async def get_client_campaign(
     page_size: int = Query(50, ge=1, le=500, description="Records per page"),
     sort_order: str = Query("desc", regex="^(asc|desc)$", description="Sort order for timestamp: asc or desc")
 ):
-    """Get client campaign dashboard with call records (latest stage of each call session)."""
+    """Get client campaign dashboard with call records (client_row = True only)."""
     PRIVILEGED_ROLES = ['admin', 'onboarding', 'qa']
     
     user_id = user_info['user_id']
@@ -265,7 +265,8 @@ async def get_client_campaign(
             end_date = today.strftime('%Y-%m-%d')
         
         # Build base query WITHOUT category filter for counting all categories
-        base_where_clauses = ["c.client_campaign_model_id = $1", "c.call_id IS NOT NULL"]
+        # Filter by client_row = True
+        base_where_clauses = ["c.client_campaign_model_id = $1", "c.call_id IS NOT NULL", "c.client_row = TRUE"]
         base_params = [campaign_id]
         base_param_count = 1
         
@@ -314,17 +315,9 @@ async def get_client_campaign(
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             LEFT JOIN voices v ON c.voice_id = v.id
             WHERE {' AND '.join(base_where_clauses)}
-            ORDER BY c.call_id, c.stage
         """
         base_calls = await conn.fetch(base_calls_query, *base_params)
         base_calls_list = [dict(call) for call in base_calls]
-        
-        # Group by call_id and get latest stage
-        base_call_sessions = group_calls_by_call_id(base_calls_list)
-        base_latest_calls = []
-        for call_id, session in base_call_sessions.items():
-            session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
-            base_latest_calls.append(session_sorted[-1])
         
         # Build filtered query WITH category filter for display
         where_clauses = base_where_clauses.copy()
@@ -353,7 +346,8 @@ async def get_client_campaign(
                 where_clauses.append(f"rc.name = ANY(${param_count})")
                 params.append(original_names)
         
-        # Query for filtered calls (with category filter if applied)
+        # Query for filtered calls (with category filter if applied) - sort in SQL
+        sort_direction = 'DESC' if sort_order.lower() == 'desc' else 'ASC'
         calls_query = f"""
             SELECT c.id, c.call_id, c.number, c.list_id, c.timestamp, c.stage, c.transferred,
                    c.transcription, rc.name as category_name, rc.color as category_color,
@@ -362,26 +356,17 @@ async def get_client_campaign(
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             LEFT JOIN voices v ON c.voice_id = v.id
             WHERE {' AND '.join(where_clauses)}
-            ORDER BY c.call_id, c.stage
+            ORDER BY c.timestamp {sort_direction}
         """
         all_calls = await conn.fetch(calls_query, *params)
         calls_list = [dict(call) for call in all_calls]
         
-        # Group by call_id and get latest stage
-        call_sessions = group_calls_by_call_id(calls_list)
-        latest_calls = []
-        for call_id, session in call_sessions.items():
-            session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
-            latest_calls.append(session_sorted[-1])
-        
-        latest_calls.sort(key=lambda x: x['timestamp'], reverse=(sort_order.lower() == 'desc'))
-        
         # Pagination on filtered calls
-        total_calls = len(latest_calls)
+        total_calls = len(calls_list)
         total_pages = (total_calls + page_size - 1) // page_size if total_calls > 0 else 1
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
-        paginated_calls = latest_calls[start_idx:end_idx]
+        paginated_calls = calls_list[start_idx:end_idx]
         
         # Get categories with counts from BASE (unfiltered by category) calls
         all_categories_query = "SELECT id, name, color FROM response_categories ORDER BY name"
@@ -393,7 +378,7 @@ async def get_client_campaign(
         category_colors = {}
         
         # Process all base calls to count categories
-        for call in base_latest_calls:
+        for call in base_calls_list:
             if call['category_name']:
                 cat_name = call['category_name']
                 # Use the resolver function
@@ -499,7 +484,7 @@ async def get_admin_campaign_dashboard(
     sort_order: str = Query("desc", regex="^(asc|desc)$", description="Sort order for timestamp: asc or desc")
 ):
     """
-    Get admin campaign dashboard with detailed call records including all stages.
+    Get admin campaign dashboard with detailed call records including all stages (client_row = False only).
     
     Supports two types of category filtering:
     1. Legacy `categories` param: filters by latest stage category only
@@ -559,7 +544,8 @@ async def get_admin_campaign_dashboard(
             end_date = today.strftime('%Y-%m-%d')
         
         # Build base query (without category filters - we'll filter in Python for efficiency)
-        where_clauses = ["c.client_campaign_model_id = $1", "c.call_id IS NOT NULL"]
+        # Filter by client_row = False
+        where_clauses = ["c.client_campaign_model_id = $1", "c.call_id IS NOT NULL", "c.client_row = FALSE"]
         params = [campaign_id]
         param_count = 1
         
@@ -890,7 +876,7 @@ async def get_transfer_metrics(
     end_date: str = Query("", description="End date YYYY-MM-DD"),
     end_time: str = Query("", description="End time HH:MM")
 ):
-    """Get transfer metrics: A-grade, B-grade transfers and drop-offs."""
+    """Get transfer metrics: A-grade, B-grade transfers and drop-offs (client_row = True only)."""
     PRIVILEGED_ROLES = ['admin', 'onboarding', 'qa']
     
     user_id = user_info['user_id']
@@ -911,8 +897,8 @@ async def get_transfer_metrics(
             start_date = today.strftime('%Y-%m-%d')
             end_date = today.strftime('%Y-%m-%d')
         
-        # Build query with filters
-        where_clauses = ["c.client_campaign_model_id = $1", "c.call_id IS NOT NULL"]
+        # Build query with filters - only client_row = True
+        where_clauses = ["c.client_campaign_model_id = $1", "c.call_id IS NOT NULL", "c.client_row = TRUE"]
         params = [campaign_id]
         param_count = 1
         
@@ -948,28 +934,18 @@ async def get_transfer_metrics(
             FROM calls c
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             WHERE {' AND '.join(where_clauses)}
-            ORDER BY c.call_id, c.stage
         """
         all_calls = await conn.fetch(calls_query, *params)
         
-        # Convert to list of dicts for grouping
+        # Convert to list of dicts
         calls_list = [dict(call) for call in all_calls]
-        
-        # Group calls by call_id
-        call_sessions = group_calls_by_call_id(calls_list)
-        
-        # Get latest stage from each session
-        latest_calls = []
-        for call_id, session in call_sessions.items():
-            session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
-            latest_calls.append(session_sorted[-1])
         
         # Calculate metrics using CLIENT_CATEGORY_MAPPING
         a_grade_transfers = 0
         b_grade_transfers = 0
         drop_offs = 0
         
-        for call in latest_calls:
+        for call in calls_list:
             original_category = call['category_name'] or ''
             combined_category = CLIENT_CATEGORY_MAPPING.get(original_category, original_category)
             is_transferred = call.get('transferred', False)
@@ -985,7 +961,7 @@ async def get_transfer_metrics(
             a_grade_transfers=a_grade_transfers,
             b_grade_transfers=b_grade_transfers,
             drop_offs=drop_offs,
-            total_calls=len(latest_calls)
+            total_calls=len(calls_list)
         )
 
 @router.get("/{campaign_id}/category-timeseries", response_model=CategoryTimeSeriesResponse)
@@ -999,7 +975,7 @@ async def get_category_timeseries(
     interval_minutes: int = Query(60, ge=1, le=1440, description="Interval in minutes (1-1440)")
 ):
     """
-    Get category counts grouped by time intervals for a client's campaign.
+    Get category counts grouped by time intervals for a client's campaign (client_row = True only).
     Returns time-series data showing how category counts change over time.
     Uses CLIENT_CATEGORY_MAPPING for category grouping.
     """
@@ -1069,7 +1045,7 @@ async def get_category_timeseries(
                 detail="Start date/time must be before end date/time"
             )
         
-        # Efficient single query to fetch all calls in time range
+        # Efficient single query to fetch all calls in time range - only client_row = True
         calls_query = """
             SELECT 
                 c.id, 
@@ -1084,24 +1060,14 @@ async def get_category_timeseries(
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
             WHERE c.client_campaign_model_id = $1
                 AND c.call_id IS NOT NULL
+                AND c.client_row = TRUE
                 AND c.timestamp >= $2
                 AND c.timestamp <= $3
-            ORDER BY c.call_id, c.stage
         """
         all_calls = await conn.fetch(calls_query, campaign_id, start_dt, end_dt)
         
-        # Convert to list of dicts for session grouping
+        # Convert to list of dicts
         calls_list = [dict(call) for call in all_calls]
-        
-        # Group calls by call_id
-        call_sessions = group_calls_by_call_id(calls_list)
-        
-        # Extract latest stage from each session (this represents the final outcome)
-        latest_calls = []
-        for call_id, session in call_sessions.items():
-            session_sorted = sorted(session, key=lambda x: x['stage'] or 0)
-            latest_call = session_sorted[-1]
-            latest_calls.append(latest_call)
         
         # Get all categories from database to build mapping
         all_categories_query = "SELECT name, color FROM response_categories ORDER BY name"
@@ -1146,7 +1112,7 @@ async def get_category_timeseries(
             current_start = current_end
         
         # Distribute calls into their respective time intervals
-        for call in latest_calls:
+        for call in calls_list:
             call_timestamp = call['timestamp']
             original_category = call['category_name'] or 'Unknown'
             
