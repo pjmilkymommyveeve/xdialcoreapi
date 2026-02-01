@@ -484,7 +484,7 @@ async def get_admin_campaign_dashboard(
     sort_order: str = Query("desc", regex="^(asc|desc)$", description="Sort order for timestamp: asc or desc")
 ):
     """
-    Get admin campaign dashboard with detailed call records including all stages (client_row = False only).
+    Get admin campaign dashboard with detailed call records including all stages.
     
     Supports two types of category filtering:
     1. Legacy `categories` param: filters by latest stage category only
@@ -543,9 +543,8 @@ async def get_admin_campaign_dashboard(
             start_date = today.strftime('%Y-%m-%d')
             end_date = today.strftime('%Y-%m-%d')
         
-        # Build base query (without category filters - we'll filter in Python for efficiency)
-        # Filter by client_row = False
-        where_clauses = ["c.client_campaign_model_id = $1", "c.call_id IS NOT NULL", "c.client_row = FALSE"]
+        # Build base query - fetch all calls for the campaign
+        where_clauses = ["c.client_campaign_model_id = $1", "c.call_id IS NOT NULL"]
         params = [campaign_id]
         param_count = 1
         
@@ -585,10 +584,10 @@ async def get_admin_campaign_dashboard(
             except ValueError:
                 pass
         
-        # Fetch all calls (no category filter in SQL for better performance with stage filters)
+        # Fetch all calls
         calls_query = f"""
             SELECT c.id, c.call_id, c.number, c.list_id, c.timestamp, c.stage, c.transferred,
-                   c.transcription, rc.name as category_name, rc.color as category_color,
+                   c.transcription, c.client_row, rc.name as category_name, rc.color as category_color,
                    v.name as voice_name
             FROM calls c
             LEFT JOIN response_categories rc ON c.response_category_id = rc.id
@@ -603,7 +602,27 @@ async def get_admin_campaign_dashboard(
         
         # Group calls by call_id (each call_id is a unique session)
         call_sessions_dict = group_calls_by_call_id(calls_list)
-        call_sessions = list(call_sessions_dict.values())
+        
+        # Filter to only include sessions where either:
+        # 1. Session has more than 1 stage (multi-stage sessions)
+        # 2. Session has only 1 stage (single-stage sessions, regardless of client_row)
+        # This effectively includes all sessions but filters out individual client_row=False calls from multi-stage sessions
+        filtered_sessions = []
+        for call_id, session in call_sessions_dict.items():
+            # Count unique stages in this session
+            unique_stages = len(set(call['stage'] for call in session))
+            
+            # Include if single stage OR if multi-stage (we'll filter client_row=False from multi-stage later)
+            if unique_stages == 1:
+                # Single stage session - include it
+                filtered_sessions.append(session)
+            else:
+                # Multi-stage session - only include client_row=False calls
+                multi_stage_calls = [call for call in session if not call.get('client_row', False)]
+                if multi_stage_calls:
+                    filtered_sessions.append(multi_stage_calls)
+        
+        call_sessions = filtered_sessions
         
         # Store unfiltered sessions for category counting
         unfiltered_sessions = call_sessions.copy()
@@ -804,9 +823,9 @@ async def get_admin_campaign_dashboard(
             original_category = latest_call['category_name'] or 'Unknown'
             combined_category = ADMIN_CATEGORY_MAPPING.get(original_category, original_category)
             
+            # Include all stages in stage_details
             stage_details = []
-            # Exclude the last stage from stage_details
-            for stage_call in stages_sorted[:-1]:
+            for stage_call in stages_sorted:
                 stage_category = stage_call['category_name'] or 'Unknown'
                 stage_combined = ADMIN_CATEGORY_MAPPING.get(stage_category, stage_category)
                 
@@ -865,6 +884,7 @@ async def get_admin_campaign_dashboard(
                 has_prev=page > 1
             )
         )
+    
 # ============== TRANSFER METRICS ENDPOINT ==============
 
 @router.get("/{campaign_id}/transfer-metrics", response_model=TransferMetrics)
